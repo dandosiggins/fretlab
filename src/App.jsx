@@ -156,6 +156,47 @@ const KEY_SIGS = ["—", "1♯", "2♯", "3♯", "4♯", "5♯", "6♯ / 6♭", 
 
 const midiFreq = (m) => 440 * Math.pow(2, (m - 69) / 12);
 
+/* -------- Pitch detection (ACF2+ autocorrelation) -------- */
+function autoCorrelate(buf, sampleRate) {
+  let SIZE = buf.length;
+  let rms = 0;
+  for (let i = 0; i < SIZE; i++) rms += buf[i] * buf[i];
+  rms = Math.sqrt(rms / SIZE);
+  if (rms < 0.01) return -1; // too quiet
+
+  let r1 = 0, r2 = SIZE - 1;
+  const thres = 0.2;
+  for (let i = 0; i < SIZE / 2; i++)
+    if (Math.abs(buf[i]) < thres) { r1 = i; break; }
+  for (let i = 1; i < SIZE / 2; i++)
+    if (Math.abs(buf[SIZE - i]) < thres) { r2 = SIZE - i; break; }
+
+  const b2 = buf.slice(r1, r2);
+  SIZE = b2.length;
+  const c = new Array(SIZE).fill(0);
+  for (let i = 0; i < SIZE; i++)
+    for (let j = 0; j < SIZE - i; j++) c[i] += b2[j] * b2[j + i];
+
+  let d = 0;
+  while (c[d] > c[d + 1]) d++;
+  let maxval = -1, maxpos = -1;
+  for (let i = d; i < SIZE; i++)
+    if (c[i] > maxval) { maxval = c[i]; maxpos = i; }
+  if (maxpos <= 0) return -1;
+
+  let T0 = maxpos;
+  const x1 = c[T0 - 1], x2 = c[T0], x3 = c[T0 + 1];
+  const a = (x1 + x3 - 2 * x2) / 2;
+  const bb = (x3 - x1) / 2;
+  if (a) T0 = T0 - bb / (2 * a);
+  return sampleRate / T0;
+}
+
+const median = (arr) => {
+  const s = [...arr].sort((a, b) => a - b);
+  return s[Math.floor(s.length / 2)];
+};
+
 function triadQuality(a, b) {
   if (a === 4 && b === 3) return { q: "", cls: "maj" };
   if (a === 3 && b === 4) return { q: "m", cls: "min" };
@@ -363,6 +404,94 @@ export default function FretLab() {
     if (prog.length < 12) setProg([...prog, deg]);
     strum(diatonic[deg]);
   };
+
+  /* -------- Tuner state & logic -------- */
+  const [tunerOn, setTunerOn] = useState(false);
+  const [pitch, setPitch] = useState(null); // {freq, note, octave, cents, midi}
+  const [micErr, setMicErr] = useState(null);
+  const micStreamRef = useRef(null);
+  const analyserRef = useRef(null);
+  const rafRef = useRef(null);
+  const recentRef = useRef([]);
+  const frameRef = useRef(0);
+
+  const stopTuner = () => {
+    if (rafRef.current) cancelAnimationFrame(rafRef.current);
+    rafRef.current = null;
+    if (micStreamRef.current) {
+      micStreamRef.current.getTracks().forEach((t) => t.stop());
+      micStreamRef.current = null;
+    }
+    analyserRef.current = null;
+    recentRef.current = [];
+    setTunerOn(false);
+    setPitch(null);
+  };
+
+  const startTuner = async () => {
+    setMicErr(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          autoGainControl: false,
+          noiseSuppression: false,
+        },
+      });
+      micStreamRef.current = stream;
+      const ctx = ensureCtx();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      analyserRef.current = analyser;
+      setTunerOn(true);
+
+      const buf = new Float32Array(analyser.fftSize);
+      const loop = () => {
+        if (!analyserRef.current) return;
+        analyserRef.current.getFloatTimeDomainData(buf);
+        const freq = autoCorrelate(buf, ctx.sampleRate);
+        if (freq > 55 && freq < 1600) {
+          recentRef.current.push(freq);
+          if (recentRef.current.length > 7) recentRef.current.shift();
+        }
+        frameRef.current++;
+        // update UI ~every 4th frame to keep the needle smooth but React calm
+        if (frameRef.current % 4 === 0) {
+          if (recentRef.current.length >= 3) {
+            const f = median(recentRef.current);
+            const midiFloat = 69 + 12 * Math.log2(f / 440);
+            const nearest = Math.round(midiFloat);
+            setPitch({
+              freq: f,
+              midi: nearest,
+              note: NOTES[((nearest % 12) + 12) % 12],
+              octave: Math.floor(nearest / 12) - 1,
+              cents: Math.max(-50, Math.min(50, (midiFloat - nearest) * 100)),
+            });
+          } else if (freq === -1) {
+            recentRef.current = [];
+            setPitch(null);
+          }
+        }
+        rafRef.current = requestAnimationFrame(loop);
+      };
+      loop();
+    } catch (e) {
+      setMicErr(
+        e.name === "NotAllowedError"
+          ? "Microphone access was denied — allow it in your browser's site settings and try again."
+          : `Couldn't open the microphone (${e.name}).`
+      );
+    }
+  };
+
+  useEffect(() => {
+    if (tab !== "tuner") stopTuner();
+    // eslint-disable-next-line
+  }, [tab]);
+  useEffect(() => stopTuner, []); // eslint-disable-line
   const activeIntervals = tab === "chords" ? CHORDS[chordName] : SCALES[scaleName];
   const pcs = useMemo(
     () => new Set(activeIntervals.map((i) => (root + i) % 12)),
@@ -465,6 +594,7 @@ export default function FretLab() {
             ["prog", "PROGRESSIONS"],
             ["circle", "CIRCLE OF 5THS"],
             ["ear", "EAR TRAINER"],
+            ["tuner", "TUNER"],
           ].map(([id, label]) => (
             <button
               key={id}
@@ -1153,6 +1283,143 @@ export default function FretLab() {
         </section>
       )}
 
+      {/* ============ TUNER ============ */}
+      {tab === "tuner" && (
+        <section className="tuner-wrap">
+          <div className="tuner-panel">
+            <div className="ear-controls">
+              <div className="ctl">
+                <label>TUNING</label>
+                <select value={tuningName} onChange={(e) => setTuningName(e.target.value)}>
+                  {Object.keys(TUNINGS).map((t) => (
+                    <option key={t} value={t}>{t}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="ctl">
+                <label>&nbsp;</label>
+                {tunerOn ? (
+                  <button className="play-btn" onClick={stopTuner}>■ STOP MIC</button>
+                ) : (
+                  <button className="ear-big tuner-start" onClick={startTuner}>
+                    ● START TUNER
+                  </button>
+                )}
+              </div>
+              <div className={`intune-lamp ${pitch && Math.abs(pitch.cents) <= 5 ? "lit" : ""}`}>
+                <span className="jewel green" />
+                <span className="power-label">IN TUNE</span>
+              </div>
+            </div>
+
+            {micErr && <p className="tip mic-err">{micErr}</p>}
+
+            {/* VU dial */}
+            <div className="vu-wrap">
+              <svg viewBox="0 0 320 190" className="vu">
+                <rect x="8" y="8" width="304" height="174" rx="8" className="vu-face" />
+                {/* in-tune zone */}
+                <path
+                  d={(() => {
+                    const cx = 160, cy = 168, r = 128;
+                    const a1 = (-90 - 6) * (Math.PI / 180), a2 = (-90 + 6) * (Math.PI / 180);
+                    const x1 = cx + Math.cos(a1) * r, y1 = cy + Math.sin(a1) * r;
+                    const x2 = cx + Math.cos(a2) * r, y2 = cy + Math.sin(a2) * r;
+                    return `M ${cx} ${cy} L ${x1} ${y1} A ${r} ${r} 0 0 1 ${x2} ${y2} Z`;
+                  })()}
+                  className="vu-zone"
+                />
+                {/* ticks every 10 cents */}
+                {[-50, -40, -30, -20, -10, 0, 10, 20, 30, 40, 50].map((c) => {
+                  const ang = (c * 1.2 - 90) * (Math.PI / 180);
+                  const cx = 160, cy = 168;
+                  const r1 = 118, r2 = c % 50 === 0 || c === 0 ? 100 : 108;
+                  return (
+                    <g key={c}>
+                      <line
+                        x1={cx + Math.cos(ang) * r2} y1={cy + Math.sin(ang) * r2}
+                        x2={cx + Math.cos(ang) * r1} y2={cy + Math.sin(ang) * r1}
+                        className={c === 0 ? "vu-tick zero" : "vu-tick"}
+                      />
+                      <text
+                        x={cx + Math.cos(ang) * 90} y={cy + Math.sin(ang) * 90 + 4}
+                        className="vu-num"
+                      >
+                        {c === 0 ? "0" : Math.abs(c)}
+                      </text>
+                    </g>
+                  );
+                })}
+                <text x="42" y="172" className="vu-flat">♭</text>
+                <text x="270" y="172" className="vu-sharp">♯</text>
+                {/* needle */}
+                <line
+                  x1="160" y1="168"
+                  x2={160 + Math.cos(((pitch ? pitch.cents : 0) * 1.2 - 90) * (Math.PI / 180)) * 120}
+                  y2={168 + Math.sin(((pitch ? pitch.cents : 0) * 1.2 - 90) * (Math.PI / 180)) * 120}
+                  className={`vu-needle ${pitch ? "" : "idle"}`}
+                />
+                <circle cx="160" cy="168" r="9" className="vu-hub" />
+              </svg>
+
+              <div className="tuner-readout">
+                <span className="tr-note">
+                  {pitch ? disp(pitch.note, useFlats) : "—"}
+                  <em>{pitch ? pitch.octave : ""}</em>
+                </span>
+                <span className="tr-detail">
+                  {pitch
+                    ? `${pitch.freq.toFixed(1)} Hz · ${pitch.cents > 0 ? "+" : ""}${pitch.cents.toFixed(0)} cents`
+                    : tunerOn
+                    ? "listening… pluck a string"
+                    : "mic is off"}
+                </span>
+              </div>
+            </div>
+
+            {/* open string targets */}
+            <div className="dia-label">OPEN STRING TARGETS — {tuningName}</div>
+            <div className="target-row">
+              {tuning.map((m, i) => {
+                const isNear =
+                  pitch && Math.abs(pitch.midi - m) < 2 &&
+                  (tuning.findIndex((x) => Math.abs(pitch.midi - x) < 2) === i);
+                return (
+                  <button
+                    key={i}
+                    className={`target-chip ${isNear ? "near" : ""}`}
+                    onClick={() => pluck(midiFreq(m), 0, 0.3)}
+                    title="Click to hear the reference pitch"
+                  >
+                    <span className="tc-str">STR {6 - i}</span>
+                    <span className="tc-note">
+                      {disp(NOTES[m % 12], useFlats)}
+                      <em>{Math.floor(m / 12) - 1}</em>
+                    </span>
+                    <span className="tc-hz">{midiFreq(m).toFixed(1)} Hz</span>
+                    {isNear && pitch && (
+                      <span className="tc-hint">
+                        {Math.abs(pitch.cents) <= 5
+                          ? "✓ in tune"
+                          : pitch.cents < 0
+                          ? "▲ tune up"
+                          : "▼ tune down"}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            <p className="tip">
+              Works best plugged into a quiet room — pluck one string at a time and
+              let it ring. Click any target chip to hear the reference pitch. The
+              needle steadies as the note sustains; chase the amber zone.
+            </p>
+          </div>
+        </section>
+      )}
+
       <footer className="foot">
         HAND-WIRED IN THE THEORY DEPARTMENT · NO TRANSISTORS WERE HARMED
       </footer>
@@ -1586,6 +1853,68 @@ const CSS = `
 .prog-actions { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
 .prog-play:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
 .prog-tip { margin-top: 14px; }
+
+/* ---------- tuner ---------- */
+.tuner-wrap { max-width: 860px; margin: 22px auto 0; padding: 0 4px; }
+.tuner-panel {
+  background: linear-gradient(180deg, var(--panel), #211b14);
+  border: 1px solid var(--line); border-radius: 8px; padding: 24px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+}
+.tuner-start { font-size: 14px; padding: 12px 26px; }
+.intune-lamp { display: flex; flex-direction: column; align-items: center; gap: 4px; margin-left: auto; }
+.jewel.green { background: radial-gradient(circle at 35% 30%, #2a4a2a, #0d1f0d); }
+.intune-lamp.lit .jewel.green {
+  background: radial-gradient(circle at 35% 30%, #a8e8a0, #3fa03a);
+  box-shadow: 0 0 18px rgba(110,220,100,0.85), 0 0 40px rgba(110,220,100,0.4);
+}
+.mic-err { color: #df9c8f; }
+.vu-wrap { display: flex; flex-wrap: wrap; gap: 24px; align-items: center; justify-content: center; margin: 18px 0 22px; }
+.vu { width: 340px; max-width: 100%; }
+.vu-face {
+  fill: linear-gradient(#f2e8d2, #d9cba8);
+  fill: #ede1c5;
+  stroke: #0d0a07; stroke-width: 3;
+}
+.vu-zone { fill: rgba(224,142,43,0.35); }
+.vu-tick { stroke: #3a2f20; stroke-width: 2; }
+.vu-tick.zero { stroke: var(--amber-deep); stroke-width: 3; }
+.vu-num {
+  fill: #4a3d2a; font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  font-weight: 600; text-anchor: middle;
+}
+.vu-flat, .vu-sharp { fill: #4a3d2a; font-size: 22px; font-family: Georgia, serif; }
+.vu-needle {
+  stroke: #1d140a; stroke-width: 3; stroke-linecap: round;
+  transition: all .12s ease-out;
+}
+.vu-needle.idle { opacity: 0.25; }
+.vu-hub { fill: #1d140a; stroke: #4a3d2a; stroke-width: 2; }
+.tuner-readout { display: flex; flex-direction: column; align-items: center; min-width: 180px; }
+.tr-note {
+  font-size: 72px; font-weight: 700; line-height: 1; color: var(--amber);
+  text-shadow: 0 0 26px rgba(255,180,84,0.5);
+}
+.tr-note em { font-style: normal; font-size: 30px; color: var(--cream-dim); }
+.tr-detail { font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--cream-dim); margin-top: 10px; }
+.target-row { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 16px; }
+.target-chip {
+  display: flex; flex-direction: column; align-items: center; gap: 2px;
+  min-width: 88px; padding: 9px 12px;
+  background: linear-gradient(180deg, #322a20, #1d1710);
+  border: 1px solid #0d0a07; border-radius: 5px; color: var(--cream);
+  transition: all .15s;
+}
+.target-chip:hover { border-color: var(--amber-deep); }
+.target-chip.near {
+  border-color: var(--amber);
+  box-shadow: 0 0 16px rgba(255,180,84,0.4);
+}
+.tc-str { font-size: 8px; letter-spacing: 2px; color: var(--cream-dim); }
+.tc-note { font-family: 'JetBrains Mono', monospace; font-size: 18px; font-weight: 700; }
+.tc-note em { font-style: normal; font-size: 11px; color: var(--cream-dim); }
+.tc-hz { font-family: 'JetBrains Mono', monospace; font-size: 9px; color: var(--cream-dim); }
+.tc-hint { font-size: 10px; letter-spacing: 1px; color: var(--amber); font-weight: 600; }
 @media (max-width: 720px) {
   .stat-name { flex-basis: 120px; font-size: 10px; }
   .ear-score { margin-left: 0; }
