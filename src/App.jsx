@@ -1,4 +1,5 @@
 import { useState, useRef, useMemo, useEffect } from "react";
+import { supabase } from "./supabase.js";
 
 /* ============================================================
    FRETLAB — Guitar Theory Workstation
@@ -197,6 +198,26 @@ const median = (arr) => {
   return s[Math.floor(s.length / 2)];
 };
 
+/* -------- Persistence -------- */
+const STORAGE_KEY = "fretlab-v1";
+const loadSaved = () => {
+  try {
+    if (typeof localStorage === "undefined") return {};
+    return JSON.parse(localStorage.getItem(STORAGE_KEY)) || {};
+  } catch {
+    return {};
+  }
+};
+const SAVED = loadSaved();
+const persist = (obj) => {
+  try {
+    if (typeof localStorage !== "undefined")
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+  } catch {
+    /* private mode / quota — run stateless */
+  }
+};
+
 function triadQuality(a, b) {
   if (a === 4 && b === 3) return { q: "", cls: "maj" };
   if (a === 3 && b === 4) return { q: "m", cls: "min" };
@@ -215,12 +236,18 @@ function seventhQuality(ints) {
 
 export default function FretLab() {
   const [tab, setTab] = useState("scales");
-  const [root, setRoot] = useState(4); // E — of course
-  const [scaleName, setScaleName] = useState("Minor Pentatonic");
-  const [chordName, setChordName] = useState("Power (5)");
-  const [tuningName, setTuningName] = useState("Standard (EADGBE)");
-  const [labelMode, setLabelMode] = useState("notes");
-  const [useFlats, setUseFlats] = useState(false);
+  const [root, setRoot] = useState(SAVED.root ?? 4); // E — of course
+  const [scaleName, setScaleName] = useState(
+    SCALES[SAVED.scaleName] ? SAVED.scaleName : "Minor Pentatonic"
+  );
+  const [chordName, setChordName] = useState(
+    CHORDS[SAVED.chordName] ? SAVED.chordName : "Power (5)"
+  );
+  const [tuningName, setTuningName] = useState(
+    TUNINGS[SAVED.tuningName] ? SAVED.tuningName : "Standard (EADGBE)"
+  );
+  const [labelMode, setLabelMode] = useState(SAVED.labelMode ?? "notes");
+  const [useFlats, setUseFlats] = useState(SAVED.useFlats ?? false);
   const [circleMode, setCircleMode] = useState("major");
   const [powerOn, setPowerOn] = useState(true);
   const [cagedShape, setCagedShape] = useState(null);
@@ -291,15 +318,23 @@ export default function FretLab() {
   };
 
   /* -------- Ear trainer state & logic -------- */
-  const [earMode, setEarMode] = useState("asc");
-  const [earPoolName, setEarPoolName] = useState("STARTER");
+  const [earMode, setEarMode] = useState(SAVED.earMode ?? "asc");
+  const [earPoolName, setEarPoolName] = useState(
+    EAR_POOLS[SAVED.earPoolName] ? SAVED.earPoolName : "STARTER"
+  );
   const [earQ, setEarQ] = useState(null);
   const [earPicked, setEarPicked] = useState(null);
-  const [earStats, setEarStats] = useState({});
-  const [earScore, setEarScore] = useState({ correct: 0, total: 0, streak: 0, best: 0 });
+  const [earStats, setEarStats] = useState(SAVED.earStats ?? {});
+  const [earScore, setEarScore] = useState(
+    SAVED.earScore ?? { correct: 0, total: 0, streak: 0, best: 0 }
+  );
 
   const playEarQ = (q) => {
     if (!q) return;
+    if (earInput === "guitar") {
+      pluck(midiFreq(q.root), 0, 0.32); // root only — the player supplies the answer
+      return;
+    }
     const second = q.dir === "desc" ? q.root - q.iv : q.root + q.iv;
     if (q.dir === "harm") {
       pluck(midiFreq(q.root), 0, 0.22);
@@ -313,9 +348,16 @@ export default function FretLab() {
   const nextEarQ = () => {
     const pool = EAR_POOLS[earPoolName];
     const iv = pool[Math.floor(Math.random() * pool.length)];
-    const dir = earMode === "mix" ? (Math.random() < 0.5 ? "asc" : "desc") : earMode;
+    const dir =
+      earInput === "guitar"
+        ? "asc"
+        : earMode === "mix"
+        ? Math.random() < 0.5 ? "asc" : "desc"
+        : earMode;
     const rootMidi = 45 + Math.floor(Math.random() * 17); // A2–C#4
     const q = { root: rootMidi, iv, dir };
+    qTimeRef.current = Date.now();
+    holdRef.current = { pc: null, count: 0 };
     setEarQ(q);
     setEarPicked(null);
     playEarQ(q);
@@ -350,12 +392,179 @@ export default function FretLab() {
   };
 
   /* -------- Progression builder state & logic -------- */
-  const [prog, setProg] = useState([]);
-  const [progSeventh, setProgSeventh] = useState(false);
-  const [bpm, setBpm] = useState(90);
+  const [prog, setProg] = useState(Array.isArray(SAVED.prog) ? SAVED.prog : []);
+  const [progSeventh, setProgSeventh] = useState(SAVED.progSeventh ?? false);
+  const [bpm, setBpm] = useState(SAVED.bpm ?? 90);
   const [progIdx, setProgIdx] = useState(null);
   const [progPlaying, setProgPlaying] = useState(false);
+  const [savedProgs, setSavedProgs] = useState(
+    Array.isArray(SAVED.savedProgs) ? SAVED.savedProgs : []
+  );
+  const [progName, setProgName] = useState("");
   const progTimersRef = useRef([]);
+
+  /* -------- Cloud sync (Supabase) + local persistence -------- */
+  const [user, setUser] = useState(null);
+  const [syncStatus, setSyncStatus] = useState("local"); // local | saving | synced | error
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [authEmail, setAuthEmail] = useState("");
+  const [authMsg, setAuthMsg] = useState(null);
+  const userRef = useRef(null);
+  const cloudTimerRef = useRef(null);
+  const hydratingRef = useRef(false);
+  const firstPersistRef = useRef(true);
+  useEffect(() => { userRef.current = user; }, [user]);
+
+  useEffect(() => {
+    if (!supabase) return;
+    supabase.auth.getSession().then(({ data }) => setUser(data.session?.user ?? null));
+    const { data: sub } = supabase.auth.onAuthStateChange((_e, session) =>
+      setUser(session?.user ?? null)
+    );
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  // Apply a state blob to the app (validating against what exists)
+  const applyState = (d) => {
+    if (!d || typeof d !== "object") return;
+    hydratingRef.current = true;
+    if (typeof d.root === "number" && d.root >= 0 && d.root < 12) setRoot(d.root);
+    if (SCALES[d.scaleName]) setScaleName(d.scaleName);
+    if (CHORDS[d.chordName]) setChordName(d.chordName);
+    if (TUNINGS[d.tuningName]) setTuningName(d.tuningName);
+    if (["notes", "intervals", "degrees"].includes(d.labelMode)) setLabelMode(d.labelMode);
+    setUseFlats(!!d.useFlats);
+    if (typeof d.bpm === "number") setBpm(Math.max(60, Math.min(160, d.bpm)));
+    setProgSeventh(!!d.progSeventh);
+    if (Array.isArray(d.prog)) setProg(d.prog);
+    if (Array.isArray(d.savedProgs)) setSavedProgs(d.savedProgs);
+    if (["asc", "desc", "harm", "mix"].includes(d.earMode)) setEarMode(d.earMode);
+    if (EAR_POOLS[d.earPoolName]) setEarPoolName(d.earPoolName);
+    if (d.earStats && typeof d.earStats === "object") setEarStats(d.earStats);
+    if (d.earScore && typeof d.earScore === "object") setEarScore(d.earScore);
+    setTimeout(() => { hydratingRef.current = false; }, 0);
+  };
+
+  const scheduleCloudSave = (blob) => {
+    if (!supabase || !userRef.current) return;
+    setSyncStatus("saving");
+    clearTimeout(cloudTimerRef.current);
+    cloudTimerRef.current = setTimeout(async () => {
+      const { error } = await supabase.from("fretlab_state").upsert({
+        user_id: userRef.current.id,
+        data: blob,
+        updated_at: new Date().toISOString(),
+      });
+      setSyncStatus(error ? "error" : "synced");
+    }, 1500);
+  };
+
+  // On sign-in: merge cloud vs local, newest wins
+  useEffect(() => {
+    if (!supabase) return;
+    if (!user) { setSyncStatus("local"); return; }
+    (async () => {
+      const { data: row, error } = await supabase
+        .from("fretlab_state")
+        .select("data")
+        .eq("user_id", user.id)
+        .maybeSingle();
+      if (error) { setSyncStatus("error"); return; }
+      const local = loadSaved();
+      const cloudTs = row?.data?._ts || 0;
+      const localTs = local?._ts || 0;
+      if (row && cloudTs > localTs) {
+        applyState(row.data);
+        persist(row.data); // mirror the winner locally
+        setSyncStatus("synced");
+      } else {
+        const blob = { ...local, _ts: localTs || Date.now() };
+        const { error: upErr } = await supabase.from("fretlab_state").upsert({
+          user_id: user.id,
+          data: blob,
+          updated_at: new Date().toISOString(),
+        });
+        setSyncStatus(upErr ? "error" : "synced");
+      }
+    })();
+    // eslint-disable-next-line
+  }, [user]);
+
+  const sendMagicLink = async () => {
+    setAuthMsg(null);
+    const email = authEmail.trim();
+    if (!email) return;
+    const { error } = await supabase.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: window.location.origin },
+    });
+    setAuthMsg(error ? error.message : "Link sent — check your email, then return here.");
+  };
+
+  const exportJSON = () => {
+    const blob = new Blob([JSON.stringify(loadSaved(), null, 2)], {
+      type: "application/json",
+    });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "fretlab-backup.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
+  const importJSON = (file) => {
+    if (!file) return;
+    const r = new FileReader();
+    r.onload = () => {
+      try {
+        const d = JSON.parse(r.result);
+        const blob = { ...d, _ts: Date.now() };
+        applyState(blob);
+        persist(blob);
+        scheduleCloudSave(blob);
+        setAuthMsg("Backup imported.");
+      } catch {
+        setAuthMsg("That file didn't parse as a FretLab backup.");
+      }
+    };
+    r.readAsText(file);
+  };
+
+  /* -------- Persist everything worth keeping -------- */
+  useEffect(() => {
+    if (firstPersistRef.current) { firstPersistRef.current = false; return; }
+    if (hydratingRef.current) return;
+    const blob = {
+      root, scaleName, chordName, tuningName, labelMode, useFlats,
+      bpm, progSeventh, prog, savedProgs,
+      earMode, earPoolName, earStats, earScore,
+      _ts: Date.now(),
+    };
+    persist(blob);
+    scheduleCloudSave(blob);
+    // eslint-disable-next-line
+  }, [
+    root, scaleName, chordName, tuningName, labelMode, useFlats,
+    bpm, progSeventh, prog, savedProgs,
+    earMode, earPoolName, earStats, earScore,
+  ]);
+
+  const saveCurrentProg = () => {
+    const name = progName.trim();
+    if (!name || prog.length === 0) return;
+    setSavedProgs([
+      ...savedProgs.filter((p) => p.name !== name),
+      { name, degs: prog, root, scaleName, seventh: progSeventh },
+    ]);
+    setProgName("");
+  };
+
+  const loadSavedProg = (p) => {
+    setProg(p.degs);
+    setRoot(p.root);
+    if (SCALES[p.scaleName]) setScaleName(p.scaleName);
+    setProgSeventh(!!p.seventh);
+  };
 
   const chordIvsFor = (ch) =>
     progSeventh
@@ -405,8 +614,9 @@ export default function FretLab() {
     strum(diatonic[deg]);
   };
 
-  /* -------- Tuner state & logic -------- */
-  const [tunerOn, setTunerOn] = useState(false);
+  /* -------- Shared mic engine (tuner + ear trainer play mode) -------- */
+  const [micOn, setMicOn] = useState(false);
+  const [micUser, setMicUser] = useState(null); // 'tuner' | 'ear'
   const [pitch, setPitch] = useState(null); // {freq, note, octave, cents, midi}
   const [micErr, setMicErr] = useState(null);
   const micStreamRef = useRef(null);
@@ -414,8 +624,9 @@ export default function FretLab() {
   const rafRef = useRef(null);
   const recentRef = useRef([]);
   const frameRef = useRef(0);
+  const onReadingRef = useRef(null);
 
-  const stopTuner = () => {
+  const stopMic = () => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
     rafRef.current = null;
     if (micStreamRef.current) {
@@ -424,11 +635,14 @@ export default function FretLab() {
     }
     analyserRef.current = null;
     recentRef.current = [];
-    setTunerOn(false);
+    onReadingRef.current = null;
+    setMicOn(false);
+    setMicUser(null);
     setPitch(null);
+    setEarLive(null);
   };
 
-  const startTuner = async () => {
+  const startMic = async (user, onReading) => {
     setMicErr(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -445,7 +659,9 @@ export default function FretLab() {
       analyser.fftSize = 2048;
       source.connect(analyser);
       analyserRef.current = analyser;
-      setTunerOn(true);
+      onReadingRef.current = onReading;
+      setMicOn(true);
+      setMicUser(user);
 
       const buf = new Float32Array(analyser.fftSize);
       const loop = () => {
@@ -457,13 +673,12 @@ export default function FretLab() {
           if (recentRef.current.length > 7) recentRef.current.shift();
         }
         frameRef.current++;
-        // update UI ~every 4th frame to keep the needle smooth but React calm
         if (frameRef.current % 4 === 0) {
           if (recentRef.current.length >= 3) {
             const f = median(recentRef.current);
             const midiFloat = 69 + 12 * Math.log2(f / 440);
             const nearest = Math.round(midiFloat);
-            setPitch({
+            onReadingRef.current?.({
               freq: f,
               midi: nearest,
               note: NOTES[((nearest % 12) + 12) % 12],
@@ -472,7 +687,7 @@ export default function FretLab() {
             });
           } else if (freq === -1) {
             recentRef.current = [];
-            setPitch(null);
+            onReadingRef.current?.(null);
           }
         }
         rafRef.current = requestAnimationFrame(loop);
@@ -487,11 +702,58 @@ export default function FretLab() {
     }
   };
 
+  /* -------- Ear trainer play mode (answer with your guitar) -------- */
+  const [earInput, setEarInput] = useState("buttons"); // 'buttons' | 'guitar'
+  const [earLive, setEarLive] = useState(null);
+  const earQRef = useRef(null);
+  const earPickedRef = useRef(null);
+  const answerEarRef = useRef(null);
+  const holdRef = useRef({ pc: null, count: 0 });
+  const qTimeRef = useRef(0);
+  useEffect(() => { earQRef.current = earQ; }, [earQ]);
+  useEffect(() => { earPickedRef.current = earPicked; }, [earPicked]);
+  answerEarRef.current = answerEar;
+
+  const onEarReading = (r) => {
+    setEarLive(r);
+    const q = earQRef.current;
+    if (!r || !q || earPickedRef.current !== null) {
+      holdRef.current = { pc: null, count: 0 };
+      return;
+    }
+    if (Date.now() - qTimeRef.current < 1200) return; // ignore the prompt's own audio
+    if (Math.abs(r.cents) > 35) return; // pitch not settled
+    const pc = ((r.midi % 12) + 12) % 12;
+    const rootPc = ((q.root % 12) + 12) % 12;
+    const targetPc = (rootPc + q.iv) % 12;
+    if (pc === rootPc && targetPc !== rootPc) {
+      holdRef.current = { pc: null, count: 0 }; // they're finding the root; not an answer
+      return;
+    }
+    if (holdRef.current.pc === pc) holdRef.current.count++;
+    else holdRef.current = { pc, count: 1 };
+    if (holdRef.current.count >= 5) {
+      let played = (pc - rootPc + 12) % 12;
+      if (played === 0) played = 12;
+      answerEarRef.current(played);
+      holdRef.current = { pc: null, count: 0 };
+    }
+  };
+
+  const setEarInputMode = (mode) => {
+    setEarInput(mode);
+    setEarQ(null);
+    setEarPicked(null);
+    if (mode === "guitar") startMic("ear", onEarReading);
+    else if (micUser === "ear") stopMic();
+  };
+
   useEffect(() => {
-    if (tab !== "tuner") stopTuner();
+    if (tab !== "tuner" && tab !== "ear") stopMic();
+    if (tab !== "ear" && earInput === "guitar") setEarInput("buttons");
     // eslint-disable-next-line
   }, [tab]);
-  useEffect(() => stopTuner, []); // eslint-disable-line
+  useEffect(() => stopMic, []); // eslint-disable-line
   const activeIntervals = tab === "chords" ? CHORDS[chordName] : SCALES[scaleName];
   const pcs = useMemo(
     () => new Set(activeIntervals.map((i) => (root + i) % 12)),
@@ -609,6 +871,16 @@ export default function FretLab() {
           ))}
         </nav>
         <button
+          className={`sync-btn s-${syncStatus}`}
+          onClick={() => setSyncOpen(!syncOpen)}
+          title="Sync & backup"
+        >
+          <span className="sync-dot" />
+          <span className="power-label">
+            {syncStatus === "synced" ? "SYNCED" : syncStatus === "saving" ? "SAVING" : syncStatus === "error" ? "SYNC ERR" : "SYNC"}
+          </span>
+        </button>
+        <button
           className={`power ${powerOn ? "lit" : ""}`}
           onClick={() => setPowerOn(!powerOn)}
           title="Sound on/off"
@@ -618,6 +890,65 @@ export default function FretLab() {
           <span className="power-label">SOUND</span>
         </button>
       </header>
+
+      {/* ============ SYNC & BACKUP PANEL ============ */}
+      {syncOpen && (
+        <section className="sync-panel">
+          {supabase ? (
+            user ? (
+              <div className="sync-row">
+                <span className="sync-info">
+                  ☁ Syncing as <strong>{user.email}</strong> — changes save to the
+                  cloud automatically and follow you to any device.
+                </span>
+                <button className="play-btn" onClick={() => supabase.auth.signOut()}>
+                  SIGN OUT
+                </button>
+              </div>
+            ) : (
+              <div className="sync-row">
+                <span className="sync-info">
+                  Sign in to sync your stats, progressions, and settings across devices.
+                  No password — we email you a link.
+                </span>
+                <input
+                  className="prog-name-input sync-email"
+                  type="email"
+                  placeholder="you@example.com"
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && sendMagicLink()}
+                />
+                <button className="play-btn" onClick={sendMagicLink} disabled={!authEmail.trim()}>
+                  SEND SIGN-IN LINK
+                </button>
+              </div>
+            )
+          ) : (
+            <div className="sync-row">
+              <span className="sync-info">
+                Cloud sync isn't configured on this build (set VITE_SUPABASE_URL and
+                VITE_SUPABASE_ANON_KEY). Local saving still works, and you can move
+                data between devices with the backup buttons.
+              </span>
+            </div>
+          )}
+          <div className="sync-row backup-row">
+            <span className="chip-label">BACKUP</span>
+            <button className="play-btn" onClick={exportJSON}>⬇ EXPORT JSON</button>
+            <label className="play-btn import-label">
+              ⬆ IMPORT JSON
+              <input
+                type="file"
+                accept="application/json,.json"
+                onChange={(e) => { importJSON(e.target.files[0]); e.target.value = ""; }}
+                hidden
+              />
+            </label>
+            {authMsg && <span className="sync-msg">{authMsg}</span>}
+          </div>
+        </section>
+      )}
 
       {(tab === "scales" || tab === "chords") && (
         <>
@@ -1018,21 +1349,40 @@ export default function FretLab() {
           <div className="ear-panel">
             <div className="ear-controls">
               <div className="ctl">
-                <label>DIRECTION</label>
+                <label>ANSWER WITH</label>
                 <div className="seg">
-                  {[["asc", "ASC"], ["desc", "DESC"], ["harm", "HARMONIC"], ["mix", "MIX"]].map(
-                    ([id, lab]) => (
-                      <button
-                        key={id}
-                        className={earMode === id ? "on" : ""}
-                        onClick={() => resetEarSession(() => setEarMode(id))}
-                      >
-                        {lab}
-                      </button>
-                    )
-                  )}
+                  <button
+                    className={earInput === "buttons" ? "on" : ""}
+                    onClick={() => setEarInputMode("buttons")}
+                  >
+                    BUTTONS
+                  </button>
+                  <button
+                    className={earInput === "guitar" ? "on" : ""}
+                    onClick={() => setEarInputMode("guitar")}
+                  >
+                    🎸 GUITAR (MIC)
+                  </button>
                 </div>
               </div>
+              {earInput === "buttons" && (
+                <div className="ctl">
+                  <label>DIRECTION</label>
+                  <div className="seg">
+                    {[["asc", "ASC"], ["desc", "DESC"], ["harm", "HARMONIC"], ["mix", "MIX"]].map(
+                      ([id, lab]) => (
+                        <button
+                          key={id}
+                          className={earMode === id ? "on" : ""}
+                          onClick={() => resetEarSession(() => setEarMode(id))}
+                        >
+                          {lab}
+                        </button>
+                      )
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="ctl">
                 <label>INTERVAL POOL</label>
                 <div className="seg">
@@ -1070,14 +1420,34 @@ export default function FretLab() {
             </div>
 
             <div className="ear-stage">
+              {micErr && tab === "ear" && <p className="tip mic-err">{micErr}</p>}
+
               {!earQ ? (
-                <button className="ear-big" onClick={nextEarQ}>▶ PLAY FIRST INTERVAL</button>
+                <button className="ear-big" onClick={nextEarQ}>
+                  {earInput === "guitar" ? "▶ PLAY FIRST ROOT" : "▶ PLAY FIRST INTERVAL"}
+                </button>
               ) : (
                 <div className="ear-live">
                   <button className="ear-replay" onClick={() => playEarQ(earQ)}>↻ REPLAY</button>
-                  <span className="ear-dir">
-                    {earQ.dir === "harm" ? "PLAYED TOGETHER" : earQ.dir === "desc" ? "DESCENDING" : "ASCENDING"}
-                  </span>
+                  {earInput === "guitar" ? (
+                    <span className="ear-prompt">
+                      ROOT {NOTES[((earQ.root % 12) + 12) % 12]}
+                      {Math.floor(earQ.root / 12) - 1} — PLAY A{" "}
+                      <strong>{IV_LONG[earQ.iv - 1].toUpperCase()}</strong> ABOVE IT
+                    </span>
+                  ) : (
+                    <span className="ear-dir">
+                      {earQ.dir === "harm" ? "PLAYED TOGETHER" : earQ.dir === "desc" ? "DESCENDING" : "ASCENDING"}
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {earInput === "guitar" && micOn && (
+                <div className={`live-pill ${earLive ? "hot" : ""}`}>
+                  {earLive
+                    ? `HEARING: ${earLive.note}${earLive.octave}`
+                    : "listening…"}
                 </div>
               )}
 
@@ -1112,6 +1482,12 @@ export default function FretLab() {
                       ? "NAILED IT."
                       : `NOT QUITE — that was a ${IV_LONG[earQ.iv - 1]}.`}
                   </div>
+                  {earInput === "guitar" && earPicked !== earQ.iv && (
+                    <div className="ev-played">
+                      You played a {IV_LONG[earPicked - 1]} — any octave counts, so
+                      check the pitch class you landed on.
+                    </div>
+                  )}
                   <div className="ev-song">
                     Reference (ascending): {EAR_SONGS[earQ.iv]}
                   </div>
@@ -1122,7 +1498,18 @@ export default function FretLab() {
 
             {Object.keys(earStats).length > 0 && (
               <div className="ear-stats">
-                <div className="dia-label">ACCURACY BY INTERVAL — your weak spots reveal themselves</div>
+                <div className="stats-head">
+                  <div className="dia-label">ACCURACY BY INTERVAL — your weak spots reveal themselves</div>
+                  <button
+                    className="reset-stats"
+                    onClick={() => {
+                      setEarStats({});
+                      setEarScore({ correct: 0, total: 0, streak: 0, best: 0 });
+                    }}
+                  >
+                    RESET STATS
+                  </button>
+                </div>
                 {Object.entries(earStats)
                   .sort((a, b) => Number(a[0]) - Number(b[0]))
                   .map(([iv, s]) => {
@@ -1268,9 +1655,54 @@ export default function FretLab() {
                     </button>
                   )}
                   {prog.length > 0 && !progPlaying && (
-                    <button className="play-btn" onClick={() => setProg([])}>CLEAR</button>
+                    <>
+                      <button className="play-btn" onClick={() => setProg([])}>CLEAR</button>
+                      <input
+                        className="prog-name-input"
+                        placeholder="name it…"
+                        value={progName}
+                        maxLength={28}
+                        onChange={(e) => setProgName(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && saveCurrentProg()}
+                      />
+                      <button
+                        className="play-btn"
+                        onClick={saveCurrentProg}
+                        disabled={!progName.trim()}
+                      >
+                        ⬇ SAVE
+                      </button>
+                    </>
                   )}
                 </div>
+
+                {savedProgs.length > 0 && (
+                  <>
+                    <div className="dia-label preset-label">YOUR SAVED PROGRESSIONS</div>
+                    <div className="preset-row">
+                      {savedProgs.map((p) => (
+                        <span key={p.name} className="saved-prog">
+                          <button className="preset-btn" onClick={() => loadSavedProg(p)}>
+                            <span>{p.name}</span>
+                            <em>
+                              {disp(NOTES[p.root], useFlats)} · {p.degs.length} chords
+                              {p.seventh ? " · 7ths" : ""}
+                            </em>
+                          </button>
+                          <button
+                            className="ps-x saved-x"
+                            aria-label={`Delete ${p.name}`}
+                            onClick={() =>
+                              setSavedProgs(savedProgs.filter((s) => s.name !== p.name))
+                            }
+                          >
+                            ×
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  </>
+                )}
 
                 <p className="tip prog-tip">
                   Chords ring for two beats each. Switch keys or scales and the same
@@ -1298,10 +1730,13 @@ export default function FretLab() {
               </div>
               <div className="ctl">
                 <label>&nbsp;</label>
-                {tunerOn ? (
-                  <button className="play-btn" onClick={stopTuner}>■ STOP MIC</button>
+                {micOn && micUser === "tuner" ? (
+                  <button className="play-btn" onClick={stopMic}>■ STOP MIC</button>
                 ) : (
-                  <button className="ear-big tuner-start" onClick={startTuner}>
+                  <button
+                    className="ear-big tuner-start"
+                    onClick={() => startMic("tuner", (r) => setPitch(r))}
+                  >
                     ● START TUNER
                   </button>
                 )}
@@ -1370,7 +1805,7 @@ export default function FretLab() {
                 <span className="tr-detail">
                   {pitch
                     ? `${pitch.freq.toFixed(1)} Hz · ${pitch.cents > 0 ? "+" : ""}${pitch.cents.toFixed(0)} cents`
-                    : tunerOn
+                    : micOn && micUser === "tuner"
                     ? "listening… pluck a string"
                     : "mic is off"}
                 </span>
@@ -1499,6 +1934,41 @@ const CSS = `
   box-shadow: 0 0 18px rgba(255,110,50,0.8), 0 0 40px rgba(255,110,50,0.35);
 }
 .power-label { font-size: 9px; letter-spacing: 2px; color: var(--cream-dim); }
+
+/* ---------- sync ---------- */
+.sync-btn { display: flex; flex-direction: column; align-items: center; gap: 4px; background: none; border: none; }
+.sync-dot {
+  width: 14px; height: 14px; border-radius: 50%;
+  border: 2px solid #0d0a07;
+  background: radial-gradient(circle at 35% 30%, #5a5245, #2a251d);
+  transition: all .2s;
+}
+.sync-btn.s-synced .sync-dot {
+  background: radial-gradient(circle at 35% 30%, #a8e8a0, #3fa03a);
+  box-shadow: 0 0 12px rgba(110,220,100,0.7);
+}
+.sync-btn.s-saving .sync-dot {
+  background: radial-gradient(circle at 35% 30%, #ffd08a, var(--amber-deep));
+  box-shadow: 0 0 12px rgba(255,180,84,0.7);
+}
+.sync-btn.s-error .sync-dot {
+  background: radial-gradient(circle at 35% 30%, #ff9a8a, #b03a2a);
+  box-shadow: 0 0 12px rgba(220,90,70,0.7);
+}
+.sync-panel {
+  max-width: 1180px; margin: 14px auto 0; padding: 14px 20px;
+  background: linear-gradient(180deg, var(--panel), #211b14);
+  border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+  display: flex; flex-direction: column; gap: 12px;
+}
+.sync-row { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.sync-info { font-family: Georgia, serif; font-size: 14px; color: #cbbfa6; flex: 1 1 320px; }
+.sync-info strong { color: var(--cream); }
+.sync-email { width: 220px; }
+.backup-row { border-top: 1px solid var(--line); padding-top: 12px; }
+.import-label { display: inline-block; cursor: pointer; }
+.sync-msg { font-family: Georgia, serif; font-style: italic; font-size: 13px; color: var(--amber); }
 
 /* ---------- control panel ---------- */
 .panel {
@@ -1759,6 +2229,19 @@ const CSS = `
   padding: 10px 20px; font-size: 13px; letter-spacing: 2px; font-weight: 600;
 }
 .ear-dir { font-size: 11px; letter-spacing: 3px; color: var(--cream-dim); }
+.ear-prompt { font-size: 13px; letter-spacing: 1.5px; color: var(--cream); }
+.ear-prompt strong { color: var(--amber); text-shadow: 0 0 10px rgba(255,180,84,0.4); }
+.live-pill {
+  display: inline-block; margin: 4px auto 12px;
+  padding: 6px 16px; border-radius: 20px;
+  background: #14100b; border: 1px solid var(--line);
+  font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--cream-dim);
+}
+.live-pill.hot {
+  color: var(--amber); border-color: var(--amber-deep);
+  box-shadow: 0 0 12px rgba(255,180,84,0.3);
+}
+.ev-played { font-family: Georgia, serif; font-style: italic; font-size: 13px; color: #cbbfa6; margin-top: 6px; }
 .ear-answers {
   display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 8px 0 4px;
 }
@@ -1850,9 +2333,25 @@ const CSS = `
   font-size: 12px; line-height: 1; padding: 0;
 }
 .ps-x:hover { color: #e8a89d; border-color: #c05b4d; }
-.prog-actions { display: flex; gap: 12px; align-items: center; margin-top: 16px; }
+.prog-actions { display: flex; gap: 12px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
 .prog-play:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
 .prog-tip { margin-top: 14px; }
+.prog-name-input {
+  background: #14100b; border: 1px solid var(--line); border-radius: 4px;
+  color: var(--cream); padding: 9px 12px; font-family: 'Oswald', sans-serif;
+  font-size: 13px; letter-spacing: 0.5px; width: 150px;
+}
+.prog-name-input::placeholder { color: #6b5f4c; font-style: italic; }
+.prog-name-input:focus { outline: none; border-color: var(--amber-deep); }
+.play-btn:disabled { opacity: 0.4; cursor: not-allowed; box-shadow: none; }
+.saved-prog { position: relative; display: inline-block; }
+.saved-x { top: -6px; right: -6px; }
+.stats-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.reset-stats {
+  background: none; border: 1px solid var(--line); border-radius: 4px;
+  color: var(--cream-dim); padding: 4px 10px; font-size: 9px; letter-spacing: 2px;
+}
+.reset-stats:hover { color: #e8a89d; border-color: #c05b4d; }
 
 /* ---------- tuner ---------- */
 .tuner-wrap { max-width: 860px; margin: 22px auto 0; padding: 0 4px; }
