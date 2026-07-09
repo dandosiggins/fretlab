@@ -63,6 +63,25 @@ const SCALE_NOTES_TIPS = {
   "Diminished (W-H)": "Symmetric 8-note scale. Repeats every 3 frets; great over dim7 chords.",
 };
 
+/* -------- Mode lens -------- */
+const MODE_ORDER = [
+  "Major (Ionian)", "Dorian", "Phrygian", "Lydian",
+  "Mixolydian", "Natural Minor (Aeolian)", "Locrian",
+];
+const MODE_SHORT = ["Ionian", "Dorian", "Phrygian", "Lydian", "Mixolydian", "Aeolian", "Locrian"];
+const MAJOR_IVS = [0, 2, 4, 5, 7, 9, 11];
+const BRIGHTNESS = [3, 0, 4, 1, 5, 2, 6]; // Lydian → Locrian, brightest to darkest
+const ORD = ["1st", "2nd", "3rd", "4th", "5th", "6th", "7th"];
+const MODE_CHAR = {
+  0: { iv: 11, why: "the leading tone — the pull toward home" },
+  1: { iv: 9, why: "the natural 6 — light inside a minor sound" },
+  2: { iv: 1, why: "the ♭2 — instant menace, one fret above the root" },
+  3: { iv: 6, why: "the ♯4 — the float" },
+  4: { iv: 10, why: "the ♭7 — major, but bluesy and unresolved" },
+  5: { iv: 8, why: "the ♭6 — the classic minor darkness" },
+  6: { iv: 6, why: "the ♭5 — the instability at its core" },
+};
+
 const CHORDS = {
   "Power (5)": [0, 7],
   "Major": [0, 4, 7],
@@ -810,6 +829,20 @@ export default function FretLab() {
     });
   }, [scaleName, root]);
 
+  // Mode lens: active when the current scale is one of the seven major-scale modes
+  const modeInfo = useMemo(() => {
+    const d = MODE_ORDER.indexOf(scaleName);
+    if (tab !== "scales" || d < 0) return null;
+    const parentPc = (root - MAJOR_IVS[d] + 12) % 12;
+    return {
+      d,
+      parentPc,
+      charIv: MODE_CHAR[d].iv,
+      charPc: (root + MODE_CHAR[d].iv) % 12,
+      why: MODE_CHAR[d].why,
+    };
+  }, [scaleName, root, tab]);
+
   const steps = useMemo(() => {
     const ivs = activeIntervals;
     const out = [];
@@ -1139,7 +1172,9 @@ export default function FretLab() {
                                 <span
                                   className={`marker ${isRoot ? "root" : ""} ${
                                     cagedWins && !inWin(fret) ? "dim" : ""
-                                  } ${isNow ? "now" : ""}`}
+                                  } ${isNow ? "now" : ""} ${
+                                    modeInfo && pc === modeInfo.charPc ? "char" : ""
+                                  }`}
                                 >
                                   {labelFor(pc)}
                                 </span>
@@ -1204,7 +1239,9 @@ export default function FretLab() {
                 {scaleNotes.map((n, i) => (
                   <button
                     key={i}
-                    className={`chip ${i === 0 ? "root" : ""}`}
+                    className={`chip ${i === 0 ? "root" : ""} ${
+                      modeInfo && NOTES.indexOf(n) === modeInfo.charPc ? "char-chip" : ""
+                    }`}
                     onClick={() => pluck(midiFreq(48 + ((NOTES.indexOf(n) - 0 + 12) % 12) + (NOTES.indexOf(n) < root ? 12 : 0)))}
                   >
                     {disp(n, useFlats)}
@@ -1224,6 +1261,78 @@ export default function FretLab() {
 
               {tab === "scales" && SCALE_NOTES_TIPS[scaleName] && (
                 <p className="tip">{SCALE_NOTES_TIPS[scaleName]}</p>
+              )}
+
+              {modeInfo && (
+                <div className="mode-lens">
+                  <div className="dia-label lens-title">MODE LENS</div>
+
+                  <div className="lens-row">
+                    <span className="lens-fact">
+                      Same notes as{" "}
+                      <strong>{disp(NOTES[modeInfo.parentPc], useFlats)} Major</strong>
+                      , started from its {ORD[modeInfo.d]} degree.
+                    </span>
+                    {modeInfo.d !== 0 && (
+                      <button
+                        className="lens-btn"
+                        onClick={() => {
+                          setRoot(modeInfo.parentPc);
+                          setScaleName(MODE_ORDER[0]);
+                        }}
+                      >
+                        VIEW {disp(NOTES[modeInfo.parentPc], useFlats)} MAJOR →
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="lens-row">
+                    <span className="lens-fact">
+                      Characteristic tone:{" "}
+                      <strong className="char-text">
+                        {disp(NOTES[modeInfo.charPc], useFlats)} ({INTERVALS[modeInfo.charIv]})
+                      </strong>{" "}
+                      — {modeInfo.why}. It glows blue on the neck; lean on it when
+                      you solo, or the mode collapses back into plain major/minor.
+                    </span>
+                  </div>
+
+                  <div className="lens-strip">
+                    <span className="chip-label">PARALLEL · SAME ROOT, BRIGHT → DARK</span>
+                    <div className="lens-chips">
+                      {BRIGHTNESS.map((di) => (
+                        <button
+                          key={di}
+                          className={`lens-chip ${di === modeInfo.d ? "on" : ""}`}
+                          onClick={() => setScaleName(MODE_ORDER[di])}
+                        >
+                          {MODE_SHORT[di]}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="lens-strip">
+                    <span className="chip-label">RELATIVE · SAME NOTES, NEW HOME</span>
+                    <div className="lens-chips">
+                      {MODE_ORDER.map((m, di) => {
+                        const r = (modeInfo.parentPc + MAJOR_IVS[di]) % 12;
+                        return (
+                          <button
+                            key={m}
+                            className={`lens-chip ${di === modeInfo.d ? "on" : ""}`}
+                            onClick={() => {
+                              setRoot(r);
+                              setScaleName(m);
+                            }}
+                          >
+                            {disp(NOTES[r], useFlats)} {MODE_SHORT[di]}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
               )}
 
               {tab === "scales" && diatonic && (
@@ -2145,6 +2254,44 @@ const CSS = `
   color: var(--cream-dim); background: rgba(0,0,0,0.3); border-radius: 3px; padding: 4px 9px;
 }
 .tip { font-family: Georgia, serif; font-size: 15px; line-height: 1.55; color: #cbbfa6; font-style: italic; margin: 10px 0 4px; max-width: 720px; }
+
+/* ---------- mode lens ---------- */
+.marker.char {
+  box-shadow: 0 0 0 2px #8cbedc, 0 0 16px rgba(140,190,220,0.75), 0 2px 5px rgba(0,0,0,0.6);
+}
+.chip.char-chip { border-color: #8cbedc; box-shadow: 0 0 10px rgba(140,190,220,0.3); }
+.chip.char-chip em { color: #a8cbe0; }
+.mode-lens {
+  margin-top: 16px; padding: 14px 16px;
+  background: rgba(140,190,220,0.05);
+  border: 1px solid rgba(140,190,220,0.28); border-radius: 6px;
+}
+.lens-title { color: #a8cbe0; }
+.lens-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 10px; }
+.lens-fact { font-family: Georgia, serif; font-size: 14px; line-height: 1.5; color: #cbbfa6; flex: 1 1 300px; }
+.lens-fact strong { color: var(--cream); font-family: 'Oswald', sans-serif; letter-spacing: 0.5px; }
+.lens-fact .char-text { color: #a8cbe0; text-shadow: 0 0 10px rgba(140,190,220,0.4); }
+.lens-btn {
+  background: linear-gradient(180deg, #2c3540, #1c232b);
+  color: #a8cbe0; border: 1px solid #45596b; border-radius: 4px;
+  padding: 7px 14px; font-size: 11px; letter-spacing: 1.5px; font-weight: 600;
+}
+.lens-btn:hover { box-shadow: 0 0 12px rgba(140,190,220,0.3); }
+.lens-strip { margin-top: 10px; }
+.lens-strip .chip-label { display: block; margin-bottom: 7px; }
+.lens-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.lens-chip {
+  background: linear-gradient(180deg, #322a20, #1d1710);
+  border: 1px solid #0d0a07; border-radius: 4px;
+  color: var(--cream-dim); padding: 6px 11px;
+  font-size: 11px; letter-spacing: 1px; font-weight: 600;
+}
+.lens-chip:hover { border-color: #45596b; color: var(--cream); }
+.lens-chip.on {
+  background: linear-gradient(180deg, #4a6478, #33475a);
+  color: #e2f1fb; border-color: #45596b;
+  box-shadow: 0 0 10px rgba(140,190,220,0.35);
+}
 
 .diatonic { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 14px; }
 .dia-label { font-size: 10px; letter-spacing: 2.5px; color: var(--cream-dim); margin-bottom: 10px; }
