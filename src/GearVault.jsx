@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import * as XLSX from "xlsx";
 import { supabase } from "./supabase";
 
 /* ============================================================
@@ -693,6 +694,64 @@ export default function GearVault() {
     URL.revokeObjectURL(url);
   };
 
+  /* --- spreadsheet export (insurance / selling) --- */
+  const CURRENCY = '"$"#,##0.00';
+  const handleSpreadsheet = () => {
+    const catName = (i) => catById[i.categoryId]?.name || "Uncategorized";
+    const sorted = [...items].sort((a, b) =>
+      catName(a).localeCompare(catName(b)) || (a.name || "").localeCompare(b.name || ""));
+
+    /* Sheet 1 — full inventory detail */
+    const header = ["Name", "Brand", "Category", "Type", "Year", "Serial Number", "Price (as entered)", "Value", "Notes"];
+    const rows = sorted.map((i) => [
+      i.name, i.brand, catName(i), i.type, i.year, i.serial || "",
+      i.price, parsePrice(i.price) || null, i.notes,
+    ]);
+    const ws = XLSX.utils.aoa_to_sheet([header, ...rows]);
+    const n = rows.length;
+    for (let r = 2; r <= n + 1; r++) {
+      const c = ws[`H${r}`];
+      if (c && c.t === "n") c.z = CURRENCY;
+    }
+    const grandTotal = sorted.reduce((s2, i) => s2 + parsePrice(i.price), 0);
+    ws[`A${n + 2}`] = { t: "s", v: "TOTAL" };
+    ws[`H${n + 2}`] = { t: "n", v: grandTotal, f: `SUM(H2:H${n + 1})`, z: CURRENCY };
+    ws["!ref"] = `A1:I${n + 2}`;
+    ws["!cols"] = [
+      { wch: 28 }, { wch: 18 }, { wch: 14 }, { wch: 14 }, { wch: 8 },
+      { wch: 18 }, { wch: 16 }, { wch: 12 }, { wch: 42 },
+    ];
+
+    /* Sheet 2 — summary by category (live formulas against the detail sheet) */
+    const catNames = [...new Set(sorted.map(catName))];
+    const sumAoa = [
+      ["Gear Inventory Summary"],
+      [`Generated ${new Date().toLocaleDateString()}`],
+      [],
+      ["Category", "Items", "Value"],
+    ];
+    const ws2 = XLSX.utils.aoa_to_sheet(sumAoa);
+    catNames.forEach((name, idx) => {
+      const r = 5 + idx;
+      const catItems = sorted.filter((i) => catName(i) === name);
+      const catValue = catItems.reduce((s2, i) => s2 + parsePrice(i.price), 0);
+      ws2[`A${r}`] = { t: "s", v: name };
+      ws2[`B${r}`] = { t: "n", v: catItems.length, f: `COUNTIF(Inventory!$C$2:$C$${n + 1},$A${r})` };
+      ws2[`C${r}`] = { t: "n", v: catValue, f: `SUMIF(Inventory!$C$2:$C$${n + 1},$A${r},Inventory!$H$2:$H$${n + 1})`, z: CURRENCY };
+    });
+    const totalR = 5 + catNames.length + 1;
+    ws2[`A${totalR}`] = { t: "s", v: "TOTAL" };
+    ws2[`B${totalR}`] = { t: "n", v: sorted.length, f: `SUM(B5:B${totalR - 2})` };
+    ws2[`C${totalR}`] = { t: "n", v: grandTotal, f: `SUM(C5:C${totalR - 2})`, z: CURRENCY };
+    ws2["!ref"] = `A1:C${totalR}`;
+    ws2["!cols"] = [{ wch: 22 }, { wch: 8 }, { wch: 14 }];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Inventory");
+    XLSX.utils.book_append_sheet(wb, ws2, "Summary");
+    XLSX.writeFile(wb, `gear-inventory-${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+
   const handleImportFile = async (e) => {
     const file = e.target.files?.[0];
     e.target.value = "";
@@ -760,8 +819,9 @@ export default function GearVault() {
           <button style={S.viewToggle(view === "chain")} onClick={() => setView("chain")}>Signal chain</button>
           <button style={S.btn(true)} onClick={() => setEditing("new")}>+ Add item</button>
           <button style={S.btn(false)} onClick={() => setShowCats(true)}>Categories</button>
-          <button style={S.btn(false)} onClick={handleExport} title="Download a JSON backup of everything, photos included">Export</button>
-          <button style={S.btn(false)} onClick={() => importRef.current?.click()} title="Restore from a JSON backup">Import</button>
+          <button style={S.btn(false)} onClick={handleSpreadsheet} title="Download an Excel copy for insurance or selling">Spreadsheet</button>
+          <button style={S.btn(false)} onClick={handleExport} title="Download a JSON backup of everything, photos included">Backup</button>
+          <button style={S.btn(false)} onClick={() => importRef.current?.click()} title="Restore from a JSON backup">Restore</button>
           <input ref={importRef} type="file" accept="application/json,.json" style={{ display: "none" }} onChange={handleImportFile} />
         </div>
       </div>
