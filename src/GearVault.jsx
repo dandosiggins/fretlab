@@ -2,13 +2,11 @@ import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { supabase } from "./supabase";
 
 /* ============================================================
-   GEAR VAULT — gear inventory module for FretLab
-   Local-first, same philosophy as FretLab sync:
-   - Every change writes to localStorage instantly.
-   - Signed in: item rows upsert to gear_items, categories to
-     gear_categories, photos to the gear-images Storage bucket.
-   - On load, cloud vs local compare per item; newest wins.
-   - Signed out / unconfigured: fully functional, local only.
+   GEAR VAULT — gear inventory module for FretLab (v2)
+   Local-first, same philosophy as FretLab sync.
+   v2 adds: serial numbers, total-value readout, JSON
+   export/import backup, and a Signal Chain view for
+   pedalboard order.
    Status jewel: grey local · amber saving · green synced · red error.
    ============================================================ */
 
@@ -25,6 +23,15 @@ const DEFAULT_CATEGORIES = [
   { id: "cat_accessories", name: "Accessories", color: "#2E86C1", types: ["Cables", "Straps", "Cases", "Strings"] },
 ];
 
+/* ---------- price parsing ---------- */
+function parsePrice(p) {
+  const n = parseFloat(String(p || "").replace(/[^0-9.]/g, ""));
+  return Number.isFinite(n) ? n : 0;
+}
+function formatMoney(n) {
+  return "$" + n.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+}
+
 /* ---------- local storage (quota-safe) ---------- */
 function readLocal() {
   try {
@@ -33,9 +40,9 @@ function readLocal() {
   } catch (e) { /* corrupt or unavailable */ }
   return null;
 }
-function writeLocal(items, categories, catsUpdatedAt) {
+function writeLocal(items, categories, catsUpdatedAt, chain) {
   try {
-    localStorage.setItem(LS_DATA, JSON.stringify({ items, categories, catsUpdatedAt }));
+    localStorage.setItem(LS_DATA, JSON.stringify({ items, categories, catsUpdatedAt, chain }));
   } catch (e) { console.warn("Local save failed", e); }
 }
 function readLocalImg(id) {
@@ -98,8 +105,8 @@ async function cloudUpsertItem(userId, item) {
   const { error } = await supabase.from("gear_items").upsert({
     id: item.id, user_id: userId, name: item.name, brand: item.brand,
     category_id: item.categoryId, type: item.type, price: item.price,
-    year: item.year, notes: item.notes, has_image: item.hasImage,
-    updated_at: item.updatedAt,
+    year: item.year, serial: item.serial || "", notes: item.notes,
+    has_image: item.hasImage, updated_at: item.updatedAt,
   });
   if (error) throw error;
 }
@@ -108,9 +115,9 @@ async function cloudDeleteItem(userId, itemId) {
   if (error) throw error;
   await supabase.storage.from("gear-images").remove([imgPath(userId, itemId)]);
 }
-async function cloudUpsertCategories(userId, categories, updatedAt) {
+async function cloudUpsertMeta(userId, categories, chain, updatedAt) {
   const { error } = await supabase.from("gear_categories").upsert({
-    user_id: userId, data: categories, updated_at: updatedAt,
+    user_id: userId, data: categories, chain: chain, updated_at: updatedAt,
   });
   if (error) throw error;
 }
@@ -148,17 +155,24 @@ const S = {
   },
   jewelLabel: { fontSize: 9, letterSpacing: "0.18em", color: "#7A6E58", textTransform: "uppercase" },
   search: {
-    flex: "1 1 200px", minWidth: 160, padding: "9px 13px", background: "#26211E",
+    flex: "1 1 180px", minWidth: 150, padding: "9px 13px", background: "#26211E",
     border: "1px solid #4A3F32", borderRadius: 6, color: "#E8DFC8", fontSize: 14, outline: "none",
   },
   btn: (primary) => ({
-    padding: "9px 16px", borderRadius: 6, cursor: "pointer", fontSize: 11, fontWeight: 700,
-    letterSpacing: "0.12em", textTransform: "uppercase",
+    padding: "9px 14px", borderRadius: 6, cursor: "pointer", fontSize: 11, fontWeight: 700,
+    letterSpacing: "0.1em", textTransform: "uppercase",
     border: primary ? "1px solid #D4A73B" : "1px solid #4A3F32",
     background: primary ? "linear-gradient(180deg, #D9AE45, #B8902E)" : "#2B2622",
     color: primary ? "#211B10" : "#CDBFA5",
   }),
-  chipRow: { maxWidth: 1080, margin: "14px auto 0", padding: "0 20px", display: "flex", gap: 8, flexWrap: "wrap" },
+  viewToggle: (active) => ({
+    padding: "9px 14px", borderRadius: 6, cursor: "pointer", fontSize: 11, fontWeight: 700,
+    letterSpacing: "0.1em", textTransform: "uppercase",
+    border: active ? "1px solid #D4A73B" : "1px solid #4A3F32",
+    background: active ? "#3A3125" : "#2B2622",
+    color: active ? "#E8D8A8" : "#8A7E66",
+  }),
+  chipRow: { maxWidth: 1080, margin: "14px auto 0", padding: "0 20px", display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" },
   chip: (active, color) => ({
     display: "flex", alignItems: "center", gap: 7, padding: "6px 13px", borderRadius: 20,
     cursor: "pointer", fontSize: 12, userSelect: "none",
@@ -169,8 +183,12 @@ const S = {
     width: 9, height: 9, borderRadius: "50%", background: on ? color : "#3B342C",
     boxShadow: on ? `0 0 7px 1px ${color}88` : "inset 0 1px 1px rgba(0,0,0,0.6)",
   }),
+  statsLine: {
+    maxWidth: 1080, margin: "12px auto 0", padding: "0 20px",
+    fontSize: 12, color: "#9C8F76", letterSpacing: "0.06em",
+  },
   grid: {
-    maxWidth: 1080, margin: "20px auto 0", padding: "0 20px",
+    maxWidth: 1080, margin: "16px auto 0", padding: "0 20px",
     display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16,
   },
   card: {
@@ -185,6 +203,7 @@ const S = {
   cardBody: { padding: "12px 14px 14px", flex: 1, display: "flex", flexDirection: "column", gap: 5 },
   cardName: { fontSize: 15, fontWeight: 700, color: "#F0E8D2", margin: 0 },
   cardMeta: { fontSize: 12, color: "#9C8F76" },
+  serial: { fontSize: 10, color: "#7A6E58", fontFamily: "monospace", letterSpacing: "0.06em" },
   badge: {
     display: "inline-flex", alignItems: "center", gap: 6, fontSize: 10, fontWeight: 700,
     letterSpacing: "0.1em", textTransform: "uppercase", color: "#CDBFA5", marginTop: 2,
@@ -196,6 +215,36 @@ const S = {
     border: danger ? "1px solid #6E332C" : "1px solid #4A3F32",
     background: "transparent", color: danger ? "#D8776C" : "#CDBFA5",
   }),
+  /* signal chain */
+  chainWrap: { maxWidth: 760, margin: "18px auto 0", padding: "0 20px" },
+  chainRow: {
+    display: "flex", alignItems: "center", gap: 12, background: "#262120",
+    border: "1px solid #3B342C", borderRadius: 8, padding: "10px 14px", marginBottom: 8,
+    boxShadow: "0 2px 6px rgba(0,0,0,0.3)",
+  },
+  chainIndex: {
+    fontFamily: "'Arial Narrow', Impact, sans-serif", fontSize: 16, fontWeight: 700,
+    color: "#D4A73B", width: 26, textAlign: "right", flexShrink: 0,
+  },
+  chainThumb: { width: 44, height: 44, objectFit: "cover", borderRadius: 6, background: "#1B1715", flexShrink: 0, border: "1px solid #3B342C" },
+  chainThumbEmpty: {
+    width: 44, height: 44, borderRadius: 6, background: "#1B1715", flexShrink: 0,
+    border: "1px solid #3B342C", display: "flex", alignItems: "center", justifyContent: "center",
+    color: "#4A4136", fontSize: 18,
+  },
+  chainBtn: {
+    width: 30, height: 26, borderRadius: 5, cursor: "pointer", fontSize: 12,
+    border: "1px solid #4A3F32", background: "#2B2622", color: "#CDBFA5", padding: 0,
+  },
+  chainCable: {
+    width: 2, height: 12, background: "#4A3F32", margin: "0 auto 8px", borderRadius: 1,
+    marginLeft: 45,
+  },
+  endpoint: {
+    display: "flex", alignItems: "center", gap: 10, padding: "8px 14px", marginBottom: 8,
+    fontSize: 11, fontWeight: 700, letterSpacing: "0.18em", textTransform: "uppercase",
+    color: "#7A6E58", border: "1px dashed #3B342C", borderRadius: 8,
+  },
   overlay: {
     position: "fixed", inset: 0, background: "rgba(12,10,9,0.78)", display: "flex",
     alignItems: "flex-start", justifyContent: "center", overflowY: "auto", zIndex: 50, padding: "40px 16px",
@@ -231,6 +280,7 @@ function ItemModal({ item, categories, onSave, onCancel }) {
   const [type, setType] = useState(item?.type || "");
   const [price, setPrice] = useState(item?.price || "");
   const [year, setYear] = useState(item?.year || "");
+  const [serial, setSerial] = useState(item?.serial || "");
   const [notes, setNotes] = useState(item?.notes || "");
   const [imgPreview, setImgPreview] = useState(item?.imgData || null);
   const [imgChanged, setImgChanged] = useState(false);
@@ -257,7 +307,8 @@ function ItemModal({ item, categories, onSave, onCancel }) {
     onSave({
       id: item?.id || uid(),
       name: name.trim(), brand: brand.trim(), categoryId,
-      type, price: price.trim(), year: year.trim(), notes: notes.trim(),
+      type, price: price.trim(), year: year.trim(),
+      serial: serial.trim(), notes: notes.trim(),
       hasImage: !!imgPreview,
       updatedAt: new Date().toISOString(),
     }, imgChanged ? imgPreview : undefined);
@@ -301,9 +352,12 @@ function ItemModal({ item, categories, onSave, onCancel }) {
           </div>
         </div>
 
+        <label style={S.label}>Serial number</label>
+        <input style={S.input} value={serial} onChange={(e) => setSerial(e.target.value)} placeholder="For insurance / registration" />
+
         <label style={S.label}>Notes</label>
         <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }}
-          value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Mods, serial number, where you got it…" />
+          value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Mods, where you got it…" />
 
         <label style={S.label}>Photo</label>
         {imgPreview && (
@@ -409,19 +463,18 @@ export default function GearVault() {
   const [items, setItems] = useState([]);
   const [categories, setCategories] = useState(DEFAULT_CATEGORIES);
   const [catsUpdatedAt, setCatsUpdatedAt] = useState(null);
+  const [chain, setChain] = useState([]); // ordered item ids
   const [images, setImages] = useState({});
   const [userId, setUserId] = useState(null);
-  const [sync, setSync] = useState("local"); // local | saving | synced | error
+  const [sync, setSync] = useState("local");
   const [search, setSearch] = useState("");
   const [filterCat, setFilterCat] = useState(null);
+  const [view, setView] = useState("inventory"); // inventory | chain
   const [editing, setEditing] = useState(null);
   const [showCats, setShowCats] = useState(false);
+  const [chainPick, setChainPick] = useState("");
   const mergedRef = useRef(false);
-
-  const flash = useCallback((state) => {
-    setSync(state);
-    if (state === "saving") return;
-  }, []);
+  const importRef = useRef(null);
 
   const runCloud = useCallback(async (fn) => {
     if (!supabase || !userId) return;
@@ -437,6 +490,7 @@ export default function GearVault() {
       setItems(local.items || []);
       if (local.categories?.length) setCategories(local.categories);
       setCatsUpdatedAt(local.catsUpdatedAt || null);
+      setChain(Array.isArray(local.chain) ? local.chain : []);
       const imgs = {};
       for (const it of local.items || []) {
         if (it.hasImage) {
@@ -454,7 +508,7 @@ export default function GearVault() {
     supabase.auth.getSession().then(({ data }) => setUserId(data?.session?.user?.id || null));
     const { data: sub } = supabase.auth.onAuthStateChange((_evt, session) => {
       setUserId(session?.user?.id || null);
-      mergedRef.current = false; // re-merge on next sign-in
+      mergedRef.current = false;
     });
     return () => sub?.subscription?.unsubscribe();
   }, []);
@@ -466,14 +520,14 @@ export default function GearVault() {
     (async () => {
       setSync("saving");
       try {
-        const [{ data: cloudItems, error: e1 }, { data: cloudCats, error: e2 }] = await Promise.all([
+        const [{ data: cloudItems, error: e1 }, { data: cloudMeta, error: e2 }] = await Promise.all([
           supabase.from("gear_items").select("*"),
           supabase.from("gear_categories").select("*").maybeSingle(),
         ]);
         if (e1) throw e1;
         if (e2 && e2.code !== "PGRST116") throw e2;
 
-        const local = readLocal() || { items: [], categories: null, catsUpdatedAt: null };
+        const local = readLocal() || { items: [], categories: null, catsUpdatedAt: null, chain: [] };
         const localItems = local.items || [];
         const localById = Object.fromEntries(localItems.map((i) => [i.id, i]));
         const merged = {};
@@ -483,13 +537,12 @@ export default function GearVault() {
         for (const ci of cloudItems || []) {
           const asLocal = {
             id: ci.id, name: ci.name, brand: ci.brand, categoryId: ci.category_id,
-            type: ci.type, price: ci.price, year: ci.year, notes: ci.notes,
-            hasImage: ci.has_image, updatedAt: ci.updated_at,
+            type: ci.type, price: ci.price, year: ci.year, serial: ci.serial || "",
+            notes: ci.notes, hasImage: ci.has_image, updatedAt: ci.updated_at,
           };
           const li = localById[ci.id];
           if (!li || new Date(ci.updated_at) >= new Date(li.updatedAt || 0)) merged[ci.id] = asLocal;
         }
-        // local items newer than cloud (or missing from cloud) get pushed up
         for (const li of localItems) {
           const ci = (cloudItems || []).find((c) => c.id === li.id);
           if (!ci || new Date(li.updatedAt || 0) > new Date(ci.updated_at)) toUpload.push(li);
@@ -497,20 +550,22 @@ export default function GearVault() {
 
         const mergedItems = Object.values(merged).sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
 
-        // categories: single blob, newest wins
         let mergedCats = local.categories?.length ? local.categories : DEFAULT_CATEGORIES;
+        let mergedChain = Array.isArray(local.chain) ? local.chain : [];
         let mergedCatsAt = local.catsUpdatedAt;
-        if (cloudCats && (!mergedCatsAt || new Date(cloudCats.updated_at) >= new Date(mergedCatsAt))) {
-          mergedCats = cloudCats.data;
-          mergedCatsAt = cloudCats.updated_at;
+        if (cloudMeta && (!mergedCatsAt || new Date(cloudMeta.updated_at) >= new Date(mergedCatsAt))) {
+          mergedCats = cloudMeta.data;
+          mergedChain = Array.isArray(cloudMeta.chain) ? cloudMeta.chain : [];
+          mergedCatsAt = cloudMeta.updated_at;
         } else if (local.categories?.length) {
-          await cloudUpsertCategories(userId, mergedCats, mergedCatsAt || new Date().toISOString());
+          await cloudUpsertMeta(userId, mergedCats, mergedChain, mergedCatsAt || new Date().toISOString());
         }
 
         setItems(mergedItems);
         setCategories(mergedCats);
+        setChain(mergedChain);
         setCatsUpdatedAt(mergedCatsAt);
-        writeLocal(mergedItems, mergedCats, mergedCatsAt);
+        writeLocal(mergedItems, mergedCats, mergedCatsAt, mergedChain);
 
         for (const li of toUpload) {
           await cloudUpsertItem(userId, li);
@@ -520,7 +575,6 @@ export default function GearVault() {
           }
         }
 
-        // hydrate any images we don't have locally
         for (const it of mergedItems) {
           if (it.hasImage && !readLocalImg(it.id)) {
             const d = await cloudDownloadImage(userId, it.id);
@@ -555,7 +609,7 @@ export default function GearVault() {
     const exists = items.some((i) => i.id === item.id);
     const newItems = exists ? items.map((i) => (i.id === item.id ? item : i)) : [item, ...items];
     setItems(newItems);
-    writeLocal(newItems, categories, catsUpdatedAt);
+    writeLocal(newItems, categories, catsUpdatedAt, chain);
     setEditing(null);
 
     runCloud(async () => {
@@ -569,10 +623,17 @@ export default function GearVault() {
     if (!window.confirm(`Remove "${item.name}" from your inventory?`)) return;
     removeLocalImg(item.id);
     const newItems = items.filter((i) => i.id !== item.id);
+    const newChain = chain.filter((id) => id !== item.id);
     setItems(newItems);
+    setChain(newChain);
     setImages((prev) => { const p = { ...prev }; delete p[item.id]; return p; });
-    writeLocal(newItems, categories, catsUpdatedAt);
-    runCloud(() => cloudDeleteItem(userId, item.id));
+    writeLocal(newItems, categories, catsUpdatedAt, newChain);
+    runCloud(async () => {
+      await cloudDeleteItem(userId, item.id);
+      if (newChain.length !== chain.length) {
+        await cloudUpsertMeta(userId, categories, newChain, new Date().toISOString());
+      }
+    });
   };
 
   const handleSaveCategories = (newCats) => {
@@ -583,21 +644,106 @@ export default function GearVault() {
     setItems(newItems);
     setCatsUpdatedAt(stamp);
     if (filterCat && !validIds.has(filterCat)) setFilterCat(null);
-    writeLocal(newItems, newCats, stamp);
+    writeLocal(newItems, newCats, stamp, chain);
     setShowCats(false);
-    runCloud(() => cloudUpsertCategories(userId, newCats, stamp));
+    runCloud(() => cloudUpsertMeta(userId, newCats, chain, stamp));
+  };
+
+  /* --- signal chain --- */
+  const saveChain = (newChain) => {
+    const stamp = new Date().toISOString();
+    setChain(newChain);
+    setCatsUpdatedAt(stamp);
+    writeLocal(items, categories, stamp, newChain);
+    runCloud(() => cloudUpsertMeta(userId, categories, newChain, stamp));
+  };
+  const moveInChain = (idx, dir) => {
+    const j = idx + dir;
+    if (j < 0 || j >= chain.length) return;
+    const next = [...chain];
+    [next[idx], next[j]] = [next[j], next[idx]];
+    saveChain(next);
+  };
+  const addToChain = (id) => {
+    if (!id || chain.includes(id)) return;
+    saveChain([...chain, id]);
+    setChainPick("");
+  };
+  const removeFromChain = (id) => saveChain(chain.filter((x) => x !== id));
+
+  /* --- export / import --- */
+  const handleExport = () => {
+    const imgs = {};
+    for (const it of items) {
+      if (it.hasImage) {
+        const d = readLocalImg(it.id) || images[it.id];
+        if (d) imgs[it.id] = d;
+      }
+    }
+    const payload = {
+      app: "fretlab-gear", version: 2, exportedAt: new Date().toISOString(),
+      items, categories, chain, images: imgs,
+    };
+    const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `fretlab-gear-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImportFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    try {
+      const data = JSON.parse(await file.text());
+      if (!Array.isArray(data.items)) throw new Error("Not a Gear Vault backup file");
+      if (!window.confirm(`Replace your current inventory with this backup (${data.items.length} items)? Current data will be overwritten locally and in the cloud.`)) return;
+
+      const stamp = new Date().toISOString();
+      const cats = data.categories?.length ? data.categories : DEFAULT_CATEGORIES;
+      const chainArr = Array.isArray(data.chain) ? data.chain : [];
+      setItems(data.items);
+      setCategories(cats);
+      setChain(chainArr);
+      setCatsUpdatedAt(stamp);
+      const imgs = {};
+      for (const [id, d] of Object.entries(data.images || {})) {
+        writeLocalImg(id, d);
+        imgs[id] = d;
+      }
+      setImages(imgs);
+      writeLocal(data.items, cats, stamp, chainArr);
+
+      runCloud(async () => {
+        await cloudUpsertMeta(userId, cats, chainArr, stamp);
+        for (const it of data.items) await cloudUpsertItem(userId, it);
+        for (const [id, d] of Object.entries(data.images || {})) await cloudUploadImage(userId, id, d);
+      });
+    } catch (err) {
+      window.alert("Import failed: " + err.message);
+    }
   };
 
   const catById = useMemo(() => Object.fromEntries(categories.map((c) => [c.id, c])), [categories]);
+  const itemById = useMemo(() => Object.fromEntries(items.map((i) => [i.id, i])), [items]);
 
   const visible = useMemo(() => {
     const q = search.trim().toLowerCase();
     return items.filter((i) => {
       if (filterCat && i.categoryId !== filterCat) return false;
       if (!q) return true;
-      return [i.name, i.brand, i.type, i.notes].some((f) => (f || "").toLowerCase().includes(q));
+      return [i.name, i.brand, i.type, i.serial, i.notes].some((f) => (f || "").toLowerCase().includes(q));
     });
   }, [items, search, filterCat]);
+
+  const visibleValue = useMemo(() => visible.reduce((s, i) => s + parsePrice(i.price), 0), [visible]);
+  const totalValue = useMemo(() => items.reduce((s, i) => s + parsePrice(i.price), 0), [items]);
+
+  const chainItems = chain.map((id) => itemById[id]).filter(Boolean);
+  const notInChain = items.filter((i) => !chain.includes(i.id));
 
   const syncLabel = { local: "local", saving: "saving", synced: "synced", error: "sync error" }[sync];
 
@@ -609,63 +755,136 @@ export default function GearVault() {
           <span style={S.jewel(sync)} title={userId ? `Cloud: ${syncLabel}` : "Local only — sign in via the SYNC jewel to back up gear"} />
           <span style={S.jewelLabel}>{userId ? syncLabel : "local"}</span>
         </h2>
-        <div style={{ marginLeft: "auto", display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-          <input style={S.search} placeholder="Search name, brand, type, notes…" value={search} onChange={(e) => setSearch(e.target.value)} />
+        <div style={{ marginLeft: "auto", display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+          <button style={S.viewToggle(view === "inventory")} onClick={() => setView("inventory")}>Inventory</button>
+          <button style={S.viewToggle(view === "chain")} onClick={() => setView("chain")}>Signal chain</button>
           <button style={S.btn(true)} onClick={() => setEditing("new")}>+ Add item</button>
           <button style={S.btn(false)} onClick={() => setShowCats(true)}>Categories</button>
+          <button style={S.btn(false)} onClick={handleExport} title="Download a JSON backup of everything, photos included">Export</button>
+          <button style={S.btn(false)} onClick={() => importRef.current?.click()} title="Restore from a JSON backup">Import</button>
+          <input ref={importRef} type="file" accept="application/json,.json" style={{ display: "none" }} onChange={handleImportFile} />
         </div>
       </div>
 
-      <div style={S.chipRow}>
-        <span style={S.chip(filterCat === null, "#D4A73B")} onClick={() => setFilterCat(null)}>
-          <span style={S.led("#D4A73B", filterCat === null)} /> All
-        </span>
-        {categories.map((c) => {
-          const active = filterCat === c.id;
-          return (
-            <span key={c.id} style={S.chip(active, c.color)} onClick={() => setFilterCat(active ? null : c.id)}>
-              <span style={S.led(c.color, active)} /> {c.name}
-              <span style={{ color: "#6E6250", fontSize: 11 }}>{items.filter((i) => i.categoryId === c.id).length}</span>
+      {view === "inventory" && (
+        <>
+          <div style={S.chipRow}>
+            <input style={S.search} placeholder="Search name, brand, type, serial, notes…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <span style={S.chip(filterCat === null, "#D4A73B")} onClick={() => setFilterCat(null)}>
+              <span style={S.led("#D4A73B", filterCat === null)} /> All
             </span>
-          );
-        })}
-      </div>
+            {categories.map((c) => {
+              const active = filterCat === c.id;
+              return (
+                <span key={c.id} style={S.chip(active, c.color)} onClick={() => setFilterCat(active ? null : c.id)}>
+                  <span style={S.led(c.color, active)} /> {c.name}
+                  <span style={{ color: "#6E6250", fontSize: 11 }}>{items.filter((i) => i.categoryId === c.id).length}</span>
+                </span>
+              );
+            })}
+          </div>
 
-      {visible.length === 0 ? (
-        <div style={S.empty}>
-          {items.length === 0
-            ? <>Your inventory is empty.<br />Hit <strong style={{ color: "#D4A73B" }}>+ Add item</strong> to log your first piece of gear.</>
-            : "Nothing matches that search or filter."}
-        </div>
-      ) : (
-        <div style={S.grid}>
-          {visible.map((item) => {
-            const cat = catById[item.categoryId];
-            const img = images[item.id];
-            return (
-              <div key={item.id} style={S.card}>
-                {img
-                  ? <img src={img} alt={item.name} style={S.cardImg} />
-                  : <div style={S.cardImgEmpty}>{item.hasImage ? "…" : "♪"}</div>}
-                <div style={S.cardBody}>
-                  <h3 style={S.cardName}>{item.name}</h3>
-                  {(item.brand || item.year) && (
-                    <div style={S.cardMeta}>{[item.brand, item.year].filter(Boolean).join(" · ")}</div>
-                  )}
-                  <div style={S.badge}>
-                    <span style={S.led(cat?.color || "#555", true)} />
-                    {cat ? cat.name : "Uncategorized"}{item.type ? ` / ${item.type}` : ""}
+          <div style={S.statsLine}>
+            {visible.length} item{visible.length !== 1 ? "s" : ""}
+            {visibleValue > 0 && <> · <span style={{ color: "#D4A73B", fontWeight: 700 }}>{formatMoney(visibleValue)}</span></>}
+            {(filterCat || search) && totalValue > 0 && totalValue !== visibleValue && (
+              <span style={{ color: "#7A6E58" }}> (collection total {formatMoney(totalValue)})</span>
+            )}
+          </div>
+
+          {visible.length === 0 ? (
+            <div style={S.empty}>
+              {items.length === 0
+                ? <>Your inventory is empty.<br />Hit <strong style={{ color: "#D4A73B" }}>+ Add item</strong> to log your first piece of gear.</>
+                : "Nothing matches that search or filter."}
+            </div>
+          ) : (
+            <div style={S.grid}>
+              {visible.map((item) => {
+                const cat = catById[item.categoryId];
+                const img = images[item.id];
+                return (
+                  <div key={item.id} style={S.card}>
+                    {img
+                      ? <img src={img} alt={item.name} style={S.cardImg} />
+                      : <div style={S.cardImgEmpty}>{item.hasImage ? "…" : "♪"}</div>}
+                    <div style={S.cardBody}>
+                      <h3 style={S.cardName}>{item.name}</h3>
+                      {(item.brand || item.year) && (
+                        <div style={S.cardMeta}>{[item.brand, item.year].filter(Boolean).join(" · ")}</div>
+                      )}
+                      <div style={S.badge}>
+                        <span style={S.led(cat?.color || "#555", true)} />
+                        {cat ? cat.name : "Uncategorized"}{item.type ? ` / ${item.type}` : ""}
+                      </div>
+                      {item.price && <div style={{ ...S.cardMeta, color: "#D4A73B", fontWeight: 700 }}>{item.price}</div>}
+                      {item.serial && <div style={S.serial}>S/N {item.serial}</div>}
+                      {item.notes && <div style={{ ...S.cardMeta, fontSize: 11, lineHeight: 1.5, marginTop: 2 }}>{item.notes}</div>}
+                      <div style={S.cardActions}>
+                        <button style={S.smallBtn(false)} onClick={() => setEditing({ ...item, imgData: images[item.id] || null })}>Edit</button>
+                        <button style={S.smallBtn(true)} onClick={() => handleDeleteItem(item)}>Remove</button>
+                      </div>
+                    </div>
                   </div>
-                  {item.price && <div style={{ ...S.cardMeta, color: "#D4A73B", fontWeight: 700 }}>{item.price}</div>}
-                  {item.notes && <div style={{ ...S.cardMeta, fontSize: 11, lineHeight: 1.5, marginTop: 2 }}>{item.notes}</div>}
-                  <div style={S.cardActions}>
-                    <button style={S.smallBtn(false)} onClick={() => setEditing({ ...item, imgData: images[item.id] || null })}>Edit</button>
-                    <button style={S.smallBtn(true)} onClick={() => handleDeleteItem(item)}>Remove</button>
-                  </div>
-                </div>
+                );
+              })}
+            </div>
+          )}
+        </>
+      )}
+
+      {view === "chain" && (
+        <div style={S.chainWrap}>
+          <div style={S.statsLine}>
+            Signal order, input to output. Reorder with the arrows — it syncs like everything else.
+          </div>
+          <div style={{ marginTop: 14 }}>
+            <div style={S.endpoint}><span style={S.led("#E03A2F", true)} /> Guitar in</div>
+            {chainItems.length === 0 && (
+              <div style={{ ...S.empty, margin: "24px auto" }}>
+                Nothing in the chain yet. Add gear below — pedals in the order the signal hits them.
               </div>
-            );
-          })}
+            )}
+            {chainItems.map((item, idx) => {
+              const cat = catById[item.categoryId];
+              const img = images[item.id];
+              return (
+                <div key={item.id}>
+                  <div style={S.chainRow}>
+                    <span style={S.chainIndex}>{idx + 1}</span>
+                    {img ? <img src={img} alt={item.name} style={S.chainThumb} /> : <div style={S.chainThumbEmpty}>♪</div>}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 14, fontWeight: 700, color: "#F0E8D2", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</div>
+                      <div style={{ ...S.badge, marginTop: 3 }}>
+                        <span style={S.led(cat?.color || "#555", true)} />
+                        {cat ? cat.name : "Uncategorized"}{item.type ? ` / ${item.type}` : ""}
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 5, flexShrink: 0 }}>
+                      <button style={{ ...S.chainBtn, opacity: idx === 0 ? 0.3 : 1 }} onClick={() => moveInChain(idx, -1)} disabled={idx === 0} title="Move earlier in chain">▲</button>
+                      <button style={{ ...S.chainBtn, opacity: idx === chainItems.length - 1 ? 0.3 : 1 }} onClick={() => moveInChain(idx, 1)} disabled={idx === chainItems.length - 1} title="Move later in chain">▼</button>
+                      <button style={{ ...S.chainBtn, color: "#D8776C", borderColor: "#6E332C" }} onClick={() => removeFromChain(item.id)} title="Remove from chain">×</button>
+                    </div>
+                  </div>
+                  <div style={S.chainCable} />
+                </div>
+              );
+            })}
+            <div style={S.endpoint}><span style={S.led("#D4A017", true)} /> Amp out</div>
+          </div>
+
+          {notInChain.length > 0 && (
+            <div style={{ display: "flex", gap: 8, marginTop: 18, alignItems: "center" }}>
+              <select style={{ ...S.input, flex: 1 }} value={chainPick} onChange={(e) => setChainPick(e.target.value)}>
+                <option value="">Add gear to the chain…</option>
+                {notInChain.map((i) => {
+                  const cat = catById[i.categoryId];
+                  return <option key={i.id} value={i.id}>{cat ? `[${cat.name}] ` : ""}{i.name}</option>;
+                })}
+              </select>
+              <button style={S.btn(true)} onClick={() => addToChain(chainPick)} disabled={!chainPick}>Add</button>
+            </div>
+          )}
         </div>
       )}
 
