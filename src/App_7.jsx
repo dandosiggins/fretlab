@@ -663,21 +663,6 @@ export default function FretLab() {
       ? SEVENTH_IVS[ch.seventh] || TRIAD_IVS[ch.quality.cls]
       : TRIAD_IVS[ch.quality.cls];
 
-  // Resolve a progression item: a number is a diatonic degree,
-  // an object is a borrowed (modal interchange) chord.
-  const progChord = (item) => {
-    if (typeof item === "number") return diatonic ? diatonic[item] : null;
-    if (!item || typeof item.pc !== "number") return null;
-    return {
-      note: NOTES[item.pc],
-      quality: { q: { maj: "", min: "m", dim: "°", aug: "+" }[item.q] ?? "", cls: item.q },
-      numeral: item.num,
-      seventh: item.sev || "",
-      rootPc: item.pc,
-      borrowed: item.src,
-    };
-  };
-
   const strum = (ch) => {
     const bass = 48 + ch.rootPc;
     const ivs = chordIvsFor(ch);
@@ -702,9 +687,8 @@ export default function FretLab() {
     prog.forEach((deg, i) => {
       progTimersRef.current.push(
         setTimeout(() => {
-          const ch = progChord(deg);
           setProgIdx(i);
-          if (ch) strum(ch);
+          strum(diatonic[deg]);
         }, i * chordMs)
       );
     });
@@ -1151,21 +1135,15 @@ export default function FretLab() {
       "°7": "dim7", "m(maj7)": "mMaj7", "+maj7": "maj7#5", "+7": "7#5",
     };
     const TRI_MAP = { maj: "", min: "m", dim: "dim", aug: "aug" };
-    const syms = [];
-    const nums = [];
-    for (const item of prog) {
-      const c = progChord(item);
-      if (!c) continue;
+    const syms = prog.map((deg) => {
+      const c = diatonic[deg];
       const n = disp(c.note, useFlats);
-      syms.push(
-        progSeventh
-          ? n + (SEV_MAP[c.seventh] ?? "")
-          : n + TRI_MAP[c.quality.cls]
-      );
-      nums.push(c.numeral);
-    }
+      return progSeventh
+        ? n + (SEV_MAP[c.seventh] ?? "")
+        : n + TRI_MAP[c.quality.cls];
+    });
     const rootName = disp(NOTES[root], useFlats);
-    const numerals = nums.join("–");
+    const numerals = prog.map((d) => diatonic[d].numeral).join("–");
     return `// FretLab: ${rootName} ${scaleName} — ${numerals} @ ${bpm} BPM
 setcpm(${bpm}/2) // one chord per cycle (2 beats each)
 
@@ -1186,58 +1164,6 @@ chord("<${syms.join(" ")}>")
     } catch {
       /* clipboard blocked — user can select from the box */
     }
-  };
-
-  /* -------- Modal interchange: borrowable chords from parallel modes -------- */
-  const borrowed = useMemo(() => {
-    if (!diatonic) return null;
-    const curSet = new Set(diatonic.map((c) => `${c.rootPc}-${c.quality.cls}`));
-    const NUM = ["I", "♭II", "II", "♭III", "III", "IV", "♭V", "V", "♭VI", "VI", "♭VII", "VII"];
-    const score = (iv, q) => {
-      const table = {
-        "8-maj": 10, "10-maj": 10, "5-min": 9, "5-maj": 9, "7-maj": 9,
-        "3-maj": 8, "0-maj": 8, "0-min": 8, "1-maj": 7, "7-min": 7,
-        "2-min": 6, "2-dim": 6,
-      };
-      return table[`${iv}-${q}`] ?? (q === "dim" ? 2 : q === "aug" ? 1 : 3);
-    };
-    const seen = new Set();
-    const out = [];
-    // harvest triads from all parallel modes (same tonic, Aeolian first)
-    for (const mi of [5, 4, 1, 2, 3, 0, 6]) {
-      const ivs = SCALES[MODE_ORDER[mi]];
-      for (let d = 0; d < 7; d++) {
-        const get = (n) => (root + ivs[(d + n) % 7] + (d + n >= 7 ? 12 : 0)) % 12;
-        const r = get(0), third = get(2), fifth = get(4), sev = get(6);
-        const a = (third - r + 12) % 12;
-        const b = (fifth - third + 12) % 12;
-        const c2 = (sev - fifth + 12) % 12;
-        const tri = triadQuality(a, b);
-        const key = `${r}-${tri.cls}`;
-        if (curSet.has(key) || seen.has(key)) continue;
-        seen.add(key);
-        const iv = (r - root + 12) % 12;
-        let num = NUM[iv];
-        if (tri.cls === "min" || tri.cls === "dim") num = num.toLowerCase();
-        if (tri.cls === "dim") num += "°";
-        if (tri.cls === "aug") num += "+";
-        out.push({
-          pc: r, q: tri.cls, num,
-          sev: seventhQuality([a, b, c2]),
-          src: MODE_SHORT[mi],
-          _score: score(iv, tri.cls),
-        });
-      }
-    }
-    out.sort((x, y) => y._score - x._score || ((x.pc - root + 12) % 12) - ((y.pc - root + 12) % 12));
-    return out.slice(0, 9);
-  }, [diatonic, root]);
-
-  const addBorrowed = (b) => {
-    const item = { pc: b.pc, q: b.q, num: b.num, sev: b.sev, src: b.src };
-    if (prog.length < 12) setProg([...prog, item]);
-    const ch = progChord(item);
-    if (ch) strum(ch);
   };
 
   // Mode lens: active when the current scale is one of the seven major-scale modes
@@ -2198,26 +2124,6 @@ chord("<${syms.join(" ")}>")
                   ))}
                 </div>
 
-                <div className="dia-label preset-label">
-                  BORROWED — MODAL INTERCHANGE (parallel modes, same tonic)
-                </div>
-                <div className="dia-row">
-                  {borrowed?.map((b, i) => (
-                    <button
-                      key={i}
-                      className={`dia-chip bchip ${b.q}`}
-                      onClick={() => addBorrowed(b)}
-                    >
-                      <span className="dia-num">{b.num}</span>
-                      <span className="dia-name">
-                        {disp(NOTES[b.pc], useFlats)}
-                        {{ maj: "", min: "m", dim: "°", aug: "+" }[b.q]}
-                      </span>
-                      <span className="dia-7">from {b.src}</span>
-                    </button>
-                  ))}
-                </div>
-
                 <div className="dia-label preset-label">OR START FROM A CLASSIC</div>
                 <div className="preset-row">
                   {PROG_PRESETS.map((p) => (
@@ -2233,14 +2139,9 @@ chord("<${syms.join(" ")}>")
                     <span className="prog-empty">Your progression is empty — add chords above.</span>
                   ) : (
                     prog.map((deg, i) => {
-                      const c = progChord(deg);
-                      if (!c) return null;
+                      const c = diatonic[deg];
                       return (
-                        <span
-                          key={i}
-                          className={`prog-slot ${progIdx === i ? "now" : ""} ${c.borrowed ? "bslot" : ""}`}
-                          title={c.borrowed ? `borrowed from ${c.borrowed}` : undefined}
-                        >
+                        <span key={i} className={`prog-slot ${progIdx === i ? "now" : ""}`}>
                           <span className="ps-num">{c.numeral}</span>
                           <span className="ps-name">
                             {progSeventh
@@ -3151,11 +3052,6 @@ const CSS = `
 .dia-chip.dim .dia-num { color: #c78f8f; }
 .dia-name { font-family: 'JetBrains Mono', monospace; font-size: 12px; font-weight: 700; }
 .dia-7 { font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--cream-dim); }
-.dia-chip.bchip { border-color: #33475a; }
-.dia-chip.bchip .dia-num { color: #a8cbe0; }
-.dia-chip.bchip:hover { border-color: #8cbedc; box-shadow: 0 0 12px rgba(140,190,220,0.3); }
-.prog-slot.bslot { border-color: #45596b; }
-.prog-slot.bslot .ps-num { color: #a8cbe0; }
 
 /* ---------- circle ---------- */
 .circle-wrap { max-width: 1180px; margin: 22px auto 0; padding: 0 4px; }
