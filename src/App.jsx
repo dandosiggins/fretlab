@@ -63,6 +63,24 @@ const SCALE_NOTES_TIPS = {
   "Diminished (W-H)": "Symmetric 8-note scale. Repeats every 3 frets; great over dim7 chords.",
 };
 
+// Group scales under their headers for proper <optgroup> rendering
+const SCALE_GROUPS = (() => {
+  const groups = [];
+  let cur = null;
+  for (const [name, v] of Object.entries(SCALES)) {
+    if (v === null) {
+      cur = { label: name.replace(/—/g, "").trim(), items: [] };
+      groups.push(cur);
+    } else if (cur) {
+      cur.items.push(name);
+    } else {
+      groups.push({ label: "", items: [name] });
+      cur = groups[groups.length - 1];
+    }
+  }
+  return groups;
+})();
+
 /* -------- Mode lens -------- */
 const MODE_ORDER = [
   "Major (Ionian)", "Dorian", "Phrygian", "Lydian",
@@ -422,6 +440,10 @@ export default function FretLab() {
   const [progName, setProgName] = useState("");
   const progTimersRef = useRef([]);
 
+  // Practice rig settings (declared here because the persist effect below uses them)
+  const [droneVol, setDroneVol] = useState(SAVED.droneVol ?? 0.15);
+  const [beatsPerBar, setBeatsPerBar] = useState(SAVED.beatsPerBar ?? 4);
+
   /* -------- Cloud sync (Supabase) + local persistence -------- */
   const [user, setUser] = useState(null);
   const [syncStatus, setSyncStatus] = useState("local"); // local | saving | synced | error
@@ -453,7 +475,9 @@ export default function FretLab() {
     if (TUNINGS[d.tuningName]) setTuningName(d.tuningName);
     if (["notes", "intervals", "degrees"].includes(d.labelMode)) setLabelMode(d.labelMode);
     setUseFlats(!!d.useFlats);
-    if (typeof d.bpm === "number") setBpm(Math.max(60, Math.min(160, d.bpm)));
+    if (typeof d.bpm === "number") setBpm(Math.max(40, Math.min(200, d.bpm)));
+    if (typeof d.droneVol === "number") setDroneVol(Math.max(0.03, Math.min(0.35, d.droneVol)));
+    if ([2, 3, 4, 6].includes(d.beatsPerBar)) setBeatsPerBar(d.beatsPerBar);
     setProgSeventh(!!d.progSeventh);
     if (Array.isArray(d.prog)) setProg(d.prog);
     if (Array.isArray(d.savedProgs)) setSavedProgs(d.savedProgs);
@@ -557,6 +581,7 @@ export default function FretLab() {
       root, scaleName, chordName, tuningName, labelMode, useFlats,
       bpm, progSeventh, prog, savedProgs,
       earMode, earPoolName, earStats, earScore,
+      droneVol, beatsPerBar,
       _ts: Date.now(),
     };
     persist(blob);
@@ -566,6 +591,7 @@ export default function FretLab() {
     root, scaleName, chordName, tuningName, labelMode, useFlats,
     bpm, progSeventh, prog, savedProgs,
     earMode, earPoolName, earStats, earScore,
+    droneVol, beatsPerBar,
   ]);
 
   const saveCurrentProg = () => {
@@ -773,6 +799,135 @@ export default function FretLab() {
     // eslint-disable-next-line
   }, [tab]);
   useEffect(() => stopMic, []); // eslint-disable-line
+
+  /* -------- Practice rig: tonic drone + metronome -------- */
+  const [droneOn, setDroneOn] = useState(false);
+  const [metroOn, setMetroOn] = useState(false);
+  const [beatFlash, setBeatFlash] = useState(-1);
+  const droneNodesRef = useRef(null);
+  const metroStateRef = useRef(null);
+  const bpmRef = useRef(bpm);
+  const beatsRef = useRef(beatsPerBar);
+  useEffect(() => { bpmRef.current = bpm; }, [bpm]);
+  useEffect(() => { beatsRef.current = beatsPerBar; }, [beatsPerBar]);
+
+  const startDrone = () => {
+    const ctx = ensureCtx();
+    const midi = 36 + root;
+    const t = ctx.currentTime;
+    const g = ctx.createGain();
+    const f = ctx.createBiquadFilter();
+    f.type = "lowpass";
+    f.frequency.value = 900;
+    const o1 = ctx.createOscillator();
+    o1.type = "sawtooth";
+    o1.frequency.value = midiFreq(midi);
+    const o2 = ctx.createOscillator();
+    o2.type = "sawtooth";
+    o2.frequency.value = midiFreq(midi) * 1.003; // gentle detune = width
+    const o3 = ctx.createOscillator();
+    o3.type = "triangle";
+    o3.frequency.value = midiFreq(midi + 12);
+    const g3 = ctx.createGain();
+    g3.gain.value = 0.4;
+    o1.connect(f); o2.connect(f);
+    o3.connect(g3); g3.connect(f);
+    f.connect(g); g.connect(ctx.destination);
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.exponentialRampToValueAtTime(Math.max(droneVol, 0.002), t + 0.5);
+    o1.start(); o2.start(); o3.start();
+    droneNodesRef.current = { o1, o2, o3, g };
+  };
+
+  const stopDrone = () => {
+    const n = droneNodesRef.current;
+    if (!n || !ctxRef.current) { droneNodesRef.current = null; return; }
+    const t = ctxRef.current.currentTime;
+    n.g.gain.cancelScheduledValues(t);
+    n.g.gain.setValueAtTime(Math.max(n.g.gain.value, 0.0001), t);
+    n.g.gain.exponentialRampToValueAtTime(0.0001, t + 0.3);
+    [n.o1, n.o2, n.o3].forEach((o) => o.stop(t + 0.35));
+    droneNodesRef.current = null;
+  };
+
+  // Drone follows the root live
+  useEffect(() => {
+    const n = droneNodesRef.current;
+    if (!n || !ctxRef.current) return;
+    const t = ctxRef.current.currentTime;
+    const midi = 36 + root;
+    n.o1.frequency.setTargetAtTime(midiFreq(midi), t, 0.06);
+    n.o2.frequency.setTargetAtTime(midiFreq(midi) * 1.003, t, 0.06);
+    n.o3.frequency.setTargetAtTime(midiFreq(midi + 12), t, 0.06);
+  }, [root]);
+
+  useEffect(() => {
+    const n = droneNodesRef.current;
+    if (!n || !ctxRef.current) return;
+    n.g.gain.setTargetAtTime(Math.max(droneVol, 0.0001), ctxRef.current.currentTime, 0.05);
+  }, [droneVol]);
+
+  const click = (t, accent) => {
+    const ctx = ctxRef.current;
+    const o = ctx.createOscillator();
+    o.type = "square";
+    o.frequency.value = accent ? 1568 : 1047;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(accent ? 0.22 : 0.14, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.05);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t); o.stop(t + 0.07);
+  };
+
+  const startMetro = () => {
+    const ctx = ensureCtx();
+    const state = { nextTime: ctx.currentTime + 0.1, beat: 0, intervalId: null };
+    const schedule = () => {
+      while (state.nextTime < ctx.currentTime + 0.12) {
+        const beatNum = state.beat % beatsRef.current;
+        click(state.nextTime, beatNum === 0);
+        const delay = Math.max(0, (state.nextTime - ctx.currentTime) * 1000);
+        setTimeout(() => setBeatFlash(beatNum), delay);
+        state.beat++;
+        state.nextTime += 60 / bpmRef.current;
+      }
+    };
+    schedule();
+    state.intervalId = setInterval(schedule, 25);
+    metroStateRef.current = state;
+  };
+
+  const stopMetro = () => {
+    if (metroStateRef.current) clearInterval(metroStateRef.current.intervalId);
+    metroStateRef.current = null;
+    setBeatFlash(-1);
+  };
+
+  const toggleDrone = () => {
+    if (droneOn) { stopDrone(); setDroneOn(false); }
+    else { setPowerOn(true); startDrone(); setDroneOn(true); }
+  };
+  const toggleMetro = () => {
+    if (metroOn) { stopMetro(); setMetroOn(false); }
+    else { setPowerOn(true); startMetro(); setMetroOn(true); }
+  };
+
+  // Practice rig stops when leaving the fretboard tabs or killing sound
+  useEffect(() => {
+    if (tab !== "scales" && tab !== "chords") {
+      stopDrone(); stopMetro();
+      setDroneOn(false); setMetroOn(false);
+    }
+    // eslint-disable-next-line
+  }, [tab]);
+  useEffect(() => {
+    if (!powerOn) {
+      stopDrone(); stopMetro();
+      setDroneOn(false); setMetroOn(false);
+    }
+    // eslint-disable-next-line
+  }, [powerOn]);
+  useEffect(() => () => { stopDrone(); stopMetro(); }, []); // eslint-disable-line
   const activeIntervals = tab === "chords" ? CHORDS[chordName] : SCALES[scaleName];
   const pcs = useMemo(
     () => new Set(activeIntervals.map((i) => (root + i) % 12)),
@@ -1012,13 +1167,13 @@ export default function FretLab() {
                 </select>
               ) : (
                 <select value={scaleName} onChange={(e) => setScaleName(e.target.value)}>
-                  {Object.entries(SCALES).map(([name, v]) =>
-                    v === null ? (
-                      <option key={name} disabled>{name}</option>
-                    ) : (
-                      <option key={name} value={name}>{name}</option>
-                    )
-                  )}
+                  {SCALE_GROUPS.map((g) => (
+                    <optgroup key={g.label} label={g.label}>
+                      {g.items.map((name) => (
+                        <option key={name} value={name}>{name}</option>
+                      ))}
+                    </optgroup>
+                  ))}
                 </select>
               )}
             </div>
@@ -1187,6 +1342,61 @@ export default function FretLab() {
                   })}
                 </div>
                 <div className="board-hint">Click any fret to hear it · open strings at left of the nut</div>
+              </div>
+            </div>
+          </section>
+
+          {/* ============ PRACTICE RIG ============ */}
+          <section className="rig-wrap">
+            <div className="rig">
+              <div className="rig-cluster">
+                <button className={`rig-btn ${droneOn ? "on" : ""}`} onClick={toggleDrone}>
+                  {droneOn ? "◉" : "○"} DRONE: {disp(NOTES[root], useFlats)}
+                </button>
+                <label className="rig-lab">
+                  VOL
+                  <input
+                    type="range" min="0.03" max="0.35" step="0.01"
+                    value={droneVol}
+                    onChange={(e) => setDroneVol(Number(e.target.value))}
+                    className="rig-slider vol-slider"
+                  />
+                </label>
+              </div>
+
+              <div className="rig-divider" />
+
+              <div className="rig-cluster">
+                <button className={`rig-btn ${metroOn ? "on" : ""}`} onClick={toggleMetro}>
+                  {metroOn ? "◉" : "○"} METRONOME
+                </button>
+                <label className="rig-lab">
+                  {bpm} BPM
+                  <input
+                    type="range" min="40" max="200" value={bpm}
+                    onChange={(e) => setBpm(Number(e.target.value))}
+                    className="rig-slider"
+                  />
+                </label>
+                <div className="seg rig-seg">
+                  {[2, 3, 4, 6].map((b) => (
+                    <button
+                      key={b}
+                      className={beatsPerBar === b ? "on" : ""}
+                      onClick={() => setBeatsPerBar(b)}
+                    >
+                      {b}
+                    </button>
+                  ))}
+                </div>
+                <div className="beat-dots">
+                  {Array.from({ length: beatsPerBar }, (_, i) => (
+                    <span
+                      key={i}
+                      className={`bdot ${beatFlash === i ? (i === 0 ? "hit1" : "hit") : ""}`}
+                    />
+                  ))}
+                </div>
               </div>
             </div>
           </section>
@@ -1686,7 +1896,7 @@ export default function FretLab() {
               <div className="ctl">
                 <label>TEMPO · {bpm} BPM</label>
                 <input
-                  type="range" min="60" max="160" value={bpm}
+                  type="range" min="40" max="200" value={bpm}
                   onChange={(e) => setBpm(Number(e.target.value))}
                   className="bpm-slider"
                 />
@@ -2105,6 +2315,18 @@ const CSS = `
   padding: 8px 12px; font-family: 'Oswald', sans-serif; font-size: 13px; letter-spacing: 0.5px;
   min-width: 190px;
 }
+.fl-root select option {
+  background: #241e16; color: var(--cream);
+  font-size: 14px; padding: 8px;
+}
+.fl-root select optgroup {
+  background: #17120c; color: var(--amber);
+  font-style: normal; font-size: 11px; letter-spacing: 1.5px;
+  font-weight: 600;
+}
+.fl-root select option:checked {
+  background: var(--amber-deep); color: #1a1207;
+}
 .seg { display: inline-flex; border: 1px solid #0d0a07; border-radius: 4px; overflow: hidden; }
 .seg button {
   background: linear-gradient(180deg, #322a20, #1d1710);
@@ -2180,6 +2402,52 @@ const CSS = `
   box-shadow: 0 0 14px rgba(255,180,84,0.8), 0 2px 5px rgba(0,0,0,0.6);
 }
 .board-hint { text-align: center; font-size: 11px; letter-spacing: 1px; color: var(--cream-dim); margin-top: 8px; }
+
+/* ---------- practice rig ---------- */
+.rig-wrap { max-width: 1180px; margin: 14px auto 0; padding: 0 4px; }
+.rig {
+  display: flex; flex-wrap: wrap; gap: 14px 22px; align-items: center;
+  padding: 12px 20px;
+  background: linear-gradient(180deg, #1d1811, #16110b);
+  border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 6px 18px rgba(0,0,0,0.4), 0 1px 0 rgba(255,220,160,0.05) inset;
+}
+.rig-cluster { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: center; }
+.rig-divider { width: 1px; height: 30px; background: var(--line); }
+.rig-btn {
+  background: linear-gradient(180deg, #322a20, #1d1710);
+  color: var(--cream-dim); border: 1px solid #0d0a07; border-radius: 4px;
+  padding: 9px 16px; font-size: 12px; letter-spacing: 2px; font-weight: 600;
+  transition: all .15s;
+}
+.rig-btn.on {
+  color: var(--amber); border-color: var(--amber-deep);
+  box-shadow: 0 0 14px rgba(255,180,84,0.35);
+  text-shadow: 0 0 8px rgba(255,180,84,0.5);
+}
+.rig-lab {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 10px; letter-spacing: 2px; color: var(--cream-dim);
+  font-family: 'JetBrains Mono', monospace;
+}
+.rig-slider { width: 130px; accent-color: var(--amber); }
+.vol-slider { width: 80px; }
+.rig-seg button { padding: 7px 11px; }
+.beat-dots { display: flex; gap: 8px; align-items: center; }
+.bdot {
+  width: 13px; height: 13px; border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #3a3227, #1d1811);
+  border: 1px solid #0d0a07;
+  transition: all .08s;
+}
+.bdot.hit {
+  background: radial-gradient(circle at 35% 30%, #f7ecd6, #cdbc9a);
+  box-shadow: 0 0 10px rgba(232,220,195,0.6);
+}
+.bdot.hit1 {
+  background: radial-gradient(circle at 35% 30%, #ffd08a, var(--amber-deep));
+  box-shadow: 0 0 14px rgba(255,180,84,0.8);
+}
 
 /* ---------- CAGED ---------- */
 .zone-layer { position: absolute; inset: 0; display: flex; pointer-events: none; z-index: 1; }
