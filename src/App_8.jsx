@@ -16,7 +16,6 @@ const TUNINGS = {
   "Standard (EADGBE)": [40, 45, 50, 55, 59, 64],
   "Drop D": [38, 45, 50, 55, 59, 64],
   "D Standard": [38, 43, 48, 53, 57, 62],
-  "C Standard": [36, 41, 46, 51, 55, 60],
   "Drop C": [36, 43, 48, 53, 57, 62],
   "DADGAD": [38, 45, 50, 55, 57, 62],
   "Open G": [38, 43, 50, 55, 59, 62],
@@ -132,7 +131,7 @@ const FRETS = 15;
 const CAGED_WINDOWS = { E: [-1, 3], D: [1, 5], C: [4, 8], A: [6, 10], G: [9, 13] };
 const CAGED_ORDER = ["C", "A", "G", "E", "D"];
 const PENT_BOX = { E: 1, D: 2, C: 3, A: 4, G: 5 };
-const CAGED_TUNINGS = ["Standard (EADGBE)", "D Standard", "C Standard"];
+const CAGED_TUNINGS = ["Standard (EADGBE)", "D Standard"];
 /* Shapes ascend the neck in the order the acronym spells: C→A→G→E→D→C… */
 const CAGED_NEXT = { C: "A", A: "G", G: "E", E: "D", D: "C" };
 const CAGED_INFO = {
@@ -1494,7 +1493,7 @@ chord("<${syms.join(" ")}>")
                 </button>
               )}
               {!cagedOk && (
-                <div className="ctl-note">needs a standard-interval tuning (E/D/C Standard)</div>
+                <div className="ctl-note">needs Standard or D Standard tuning</div>
               )}
             </div>
 
