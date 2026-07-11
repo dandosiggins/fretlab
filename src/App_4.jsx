@@ -235,34 +235,6 @@ const median = (arr) => {
   return s[Math.floor(s.length / 2)];
 };
 
-/* -------- Adaptive practice (spaced-repetition-style weighting) --------
-   Weak items get asked more, unseen items get covered, stale items
-   resurface, and the same item rarely repeats back-to-back. */
-const adaptivePick = (items, stats, lastItem) => {
-  const now = Date.now();
-  const weights = items.map((it) => {
-    const s = stats[it];
-    let w;
-    if (!s || !s.asked) {
-      w = 1.3; // never seen: prioritize coverage
-    } else {
-      const acc = s.correct / s.asked;
-      w = 0.25 + (1 - acc) * 1.5; // weaker → more frequent
-      const days = s.last ? (now - s.last) / 86400000 : 7;
-      w *= 1 + Math.min(days, 7) * 0.08; // gently resurface stale items
-    }
-    if (it === lastItem) w *= 0.35; // damp immediate repeats
-    return w;
-  });
-  const total = weights.reduce((a, b) => a + b, 0);
-  let r = Math.random() * total;
-  for (let i = 0; i < items.length; i++) {
-    r -= weights[i];
-    if (r <= 0) return items[i];
-  }
-  return items[items.length - 1];
-};
-
 /* -------- Persistence -------- */
 const STORAGE_KEY = "fretlab-v1";
 const loadSaved = () => {
@@ -412,9 +384,7 @@ export default function FretLab() {
 
   const nextEarQ = () => {
     const pool = EAR_POOLS[earPoolName];
-    const iv = adaptive
-      ? adaptivePick(pool, earStats, earQRef.current?.iv)
-      : pool[Math.floor(Math.random() * pool.length)];
+    const iv = pool[Math.floor(Math.random() * pool.length)];
     const dir =
       earInput === "guitar"
         ? "asc"
@@ -439,7 +409,6 @@ export default function FretLab() {
       [earQ.iv]: {
         asked: (s[earQ.iv]?.asked || 0) + 1,
         correct: (s[earQ.iv]?.correct || 0) + (ok ? 1 : 0),
-        last: Date.now(),
       },
     }));
     setEarScore((sc) => {
@@ -482,7 +451,6 @@ export default function FretLab() {
   );
   const [nqRange, setNqRange] = useState([5, 12, 15].includes(SAVED.nqRange) ? SAVED.nqRange : 12);
   const [nqMode, setNqMode] = useState(SAVED.nqMode === "find" ? "find" : "name");
-  const [adaptive, setAdaptive] = useState(SAVED.adaptive ?? true);
 
   /* -------- Cloud sync (Supabase) + local persistence -------- */
   const [user, setUser] = useState(null);
@@ -522,7 +490,6 @@ export default function FretLab() {
     if (d.nqScore && typeof d.nqScore === "object") setNqScore(d.nqScore);
     if ([5, 12, 15].includes(d.nqRange)) setNqRange(d.nqRange);
     if (["name", "find"].includes(d.nqMode)) setNqMode(d.nqMode);
-    if (typeof d.adaptive === "boolean") setAdaptive(d.adaptive);
     setProgSeventh(!!d.progSeventh);
     if (Array.isArray(d.prog)) setProg(d.prog);
     if (Array.isArray(d.savedProgs)) setSavedProgs(d.savedProgs);
@@ -627,7 +594,7 @@ export default function FretLab() {
       bpm, progSeventh, prog, savedProgs,
       earMode, earPoolName, earStats, earScore,
       droneVol, beatsPerBar,
-      nqStats, nqScore, nqRange, nqMode, adaptive,
+      nqStats, nqScore, nqRange, nqMode,
       _ts: Date.now(),
     };
     persist(blob);
@@ -638,7 +605,7 @@ export default function FretLab() {
     bpm, progSeventh, prog, savedProgs,
     earMode, earPoolName, earStats, earScore,
     droneVol, beatsPerBar,
-    nqStats, nqScore, nqRange, nqMode, adaptive,
+    nqStats, nqScore, nqRange, nqMode,
   ]);
 
   const saveCurrentProg = () => {
@@ -991,18 +958,10 @@ export default function FretLab() {
   useEffect(() => { nqPickedRef.current = nqPicked; }, [nqPicked]);
 
   const nextNq = () => {
-    const allPcs = Array.from({ length: 12 }, (_, i) => i);
-    const pc = adaptive
-      ? adaptivePick(allPcs, nqStats, nqRef.current?.pc)
-      : allPcs[Math.floor(Math.random() * 12)];
-    // every position in range where that pitch class lives
-    const cands = [];
-    tuning.forEach((open, s) => {
-      for (let f = 0; f <= nqRange; f++)
-        if ((open + f) % 12 === pc) cands.push({ s, f });
-    });
-    const c = cands[Math.floor(Math.random() * cands.length)];
-    setNq(nqMode === "name" ? { kind: "name", s: c.s, f: c.f, pc } : { kind: "find", s: c.s, pc });
+    const s = Math.floor(Math.random() * 6);
+    const f = Math.floor(Math.random() * (nqRange + 1));
+    const pc = (tuning[s] + f) % 12;
+    setNq(nqMode === "name" ? { kind: "name", s, f, pc } : { kind: "find", s, pc });
     setNqPicked(null);
     setNqClicked(null);
     nqTimeRef.current = Date.now();
@@ -1019,7 +978,6 @@ export default function FretLab() {
       [nq.pc]: {
         asked: (s[nq.pc]?.asked || 0) + 1,
         correct: (s[nq.pc]?.correct || 0) + (ok ? 1 : 0),
-        last: Date.now(),
       },
     }));
     setNqScore((sc) => {
@@ -1857,17 +1815,6 @@ export default function FretLab() {
                   ))}
                 </div>
               </div>
-              <div className="ctl">
-                <label>PICKING</label>
-                <div className="seg">
-                  <button className={adaptive ? "on" : ""} onClick={() => setAdaptive(true)} title="Weak and stale items come up more often">
-                    ADAPTIVE
-                  </button>
-                  <button className={!adaptive ? "on" : ""} onClick={() => setAdaptive(false)}>
-                    RANDOM
-                  </button>
-                </div>
-              </div>
               <div className="ear-score">
                 <div className="meter-box">
                   <span className="meter-num">
@@ -1970,9 +1917,7 @@ export default function FretLab() {
             {Object.keys(earStats).length > 0 && (
               <div className="ear-stats">
                 <div className="stats-head">
-                  <div className="dia-label">
-                    ACCURACY BY INTERVAL{adaptive && " — weak spots are being fed to you more often"}
-                  </div>
+                  <div className="dia-label">ACCURACY BY INTERVAL — your weak spots reveal themselves</div>
                   <button
                     className="reset-stats"
                     onClick={() => {
@@ -1989,7 +1934,7 @@ export default function FretLab() {
                     const pct = Math.round((100 * s.correct) / s.asked);
                     return (
                       <div className="stat-row" key={iv}>
-                        <span className={`stat-name ${pct < 60 && s.asked >= 3 ? "weak" : ""}`}>
+                        <span className="stat-name">
                           {IV_SHORT[iv - 1]} · {IV_LONG[iv - 1]}
                         </span>
                         <span className="stat-bar">
@@ -2375,17 +2320,6 @@ export default function FretLab() {
                   </button>
                 </div>
               </div>
-              <div className="ctl">
-                <label>PICKING</label>
-                <div className="seg">
-                  <button className={adaptive ? "on" : ""} onClick={() => setAdaptive(true)} title="Weak and stale notes come up more often">
-                    ADAPTIVE
-                  </button>
-                  <button className={!adaptive ? "on" : ""} onClick={() => setAdaptive(false)}>
-                    RANDOM
-                  </button>
-                </div>
-              </div>
               <div className="ear-score">
                 <div className="meter-box">
                   <span className="meter-num">
@@ -2550,9 +2484,7 @@ export default function FretLab() {
             {Object.keys(nqStats).length > 0 && (
               <div className="ear-stats">
                 <div className="stats-head">
-                  <div className="dia-label">
-                    ACCURACY BY NOTE{adaptive && " — weak notes are being fed to you more often"}
-                  </div>
+                  <div className="dia-label">ACCURACY BY NOTE</div>
                   <button
                     className="reset-stats"
                     onClick={() => {
@@ -2569,9 +2501,7 @@ export default function FretLab() {
                     const pct = Math.round((100 * s.correct) / s.asked);
                     return (
                       <div className="stat-row" key={pc}>
-                        <span className={`stat-name ${pct < 60 && s.asked >= 3 ? "weak" : ""}`}>
-                          {disp(NOTES[pc], useFlats)}
-                        </span>
+                        <span className="stat-name">{disp(NOTES[pc], useFlats)}</span>
                         <span className="stat-bar">
                           <span className="stat-fill" style={{ width: `${pct}%` }} />
                         </span>
@@ -3133,7 +3063,6 @@ const CSS = `
 .stat-name {
   flex: 0 0 190px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--cream);
 }
-.stat-name.weak { color: var(--amber); text-shadow: 0 0 8px rgba(255,180,84,0.35); }
 .stat-bar {
   flex: 1; height: 10px; background: #14100b; border-radius: 5px; overflow: hidden;
   border: 1px solid #0d0a07;
