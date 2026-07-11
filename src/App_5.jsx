@@ -658,48 +658,6 @@ export default function FretLab() {
     setProgSeventh(!!p.seventh);
   };
 
-  /* -------- Strudel export -------- */
-  const [strudelOpen, setStrudelOpen] = useState(false);
-  const [copied, setCopied] = useState(false);
-
-  const strudelCode = useMemo(() => {
-    if (!diatonic || prog.length === 0) return "";
-    const SEV_MAP = {
-      "maj7": "maj7", "7": "7", "m7": "m7", "m7♭5": "m7b5",
-      "°7": "dim7", "m(maj7)": "mMaj7", "+maj7": "maj7#5", "+7": "7#5",
-    };
-    const TRI_MAP = { maj: "", min: "m", dim: "dim", aug: "aug" };
-    const syms = prog.map((deg) => {
-      const c = diatonic[deg];
-      const n = disp(c.note, useFlats);
-      return progSeventh
-        ? n + (SEV_MAP[c.seventh] ?? "")
-        : n + TRI_MAP[c.quality.cls];
-    });
-    const rootName = disp(NOTES[root], useFlats);
-    const numerals = prog.map((d) => diatonic[d].numeral).join("–");
-    return `// FretLab: ${rootName} ${scaleName} — ${numerals} @ ${bpm} BPM
-setcpm(${bpm}/2) // one chord per cycle (2 beats each)
-
-chord("<${syms.join(" ")}>")
-  .voicing()
-  .s("gm_epiano1")
-  .room(.4)
-
-// darken it — layer a tonic drone underneath:
-// note("${rootName.toLowerCase()}2").s("gm_pad_halo").slow(4).gain(.5)`;
-  }, [diatonic, prog, progSeventh, useFlats, root, scaleName, bpm]);
-
-  const copyStrudel = async () => {
-    try {
-      await navigator.clipboard.writeText(strudelCode);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard blocked — user can select from the box */
-    }
-  };
-
   const chordIvsFor = (ch) =>
     progSeventh
       ? SEVENTH_IVS[ch.seventh] || TRIAD_IVS[ch.quality.cls]
@@ -2172,12 +2130,6 @@ chord("<${syms.join(" ")}>")
                   {prog.length > 0 && !progPlaying && (
                     <>
                       <button className="play-btn" onClick={() => setProg([])}>CLEAR</button>
-                      <button
-                        className={`play-btn strudel-btn ${strudelOpen ? "lit" : ""}`}
-                        onClick={() => setStrudelOpen(!strudelOpen)}
-                      >
-                        ⌁ STRUDEL
-                      </button>
                       <input
                         className="prog-name-input"
                         placeholder="name it…"
@@ -2196,20 +2148,6 @@ chord("<${syms.join(" ")}>")
                     </>
                   )}
                 </div>
-
-                {strudelOpen && strudelCode && (
-                  <div className="strudel-box">
-                    <div className="stats-head">
-                      <div className="dia-label">
-                        STRUDEL PATTERN — paste into strudel.cc and hit play
-                      </div>
-                      <button className="play-btn" onClick={copyStrudel}>
-                        {copied ? "✓ COPIED" : "⧉ COPY"}
-                      </button>
-                    </div>
-                    <pre className="strudel-code">{strudelCode}</pre>
-                  </div>
-                )}
 
                 {savedProgs.length > 0 && (
                   <>
@@ -3196,21 +3134,6 @@ const CSS = `
   flex: 0 0 190px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--cream);
 }
 .stat-name.weak { color: var(--amber); text-shadow: 0 0 8px rgba(255,180,84,0.35); }
-
-/* ---------- strudel export ---------- */
-.strudel-btn.lit { box-shadow: 0 0 14px rgba(255,180,84,0.45); }
-.strudel-box {
-  margin-top: 14px; padding: 14px 16px;
-  background: #100d09; border: 1px solid var(--line); border-radius: 6px;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.5) inset;
-}
-.strudel-code {
-  margin: 10px 0 0; padding: 12px 14px;
-  background: #0a0806; border: 1px solid #0d0a07; border-radius: 4px;
-  font-family: 'JetBrains Mono', monospace; font-size: 13px; line-height: 1.6;
-  color: #c8e6a0; white-space: pre; overflow-x: auto;
-  user-select: all;
-}
 .stat-bar {
   flex: 1; height: 10px; background: #14100b; border-radius: 5px; overflow: hidden;
   border: 1px solid #0d0a07;
