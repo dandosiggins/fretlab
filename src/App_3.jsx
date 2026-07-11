@@ -444,14 +444,6 @@ export default function FretLab() {
   const [droneVol, setDroneVol] = useState(SAVED.droneVol ?? 0.15);
   const [beatsPerBar, setBeatsPerBar] = useState(SAVED.beatsPerBar ?? 4);
 
-  // Note quiz persisted state (same reason)
-  const [nqStats, setNqStats] = useState(SAVED.nqStats ?? {});
-  const [nqScore, setNqScore] = useState(
-    SAVED.nqScore ?? { correct: 0, total: 0, streak: 0, best: 0 }
-  );
-  const [nqRange, setNqRange] = useState([5, 12, 15].includes(SAVED.nqRange) ? SAVED.nqRange : 12);
-  const [nqMode, setNqMode] = useState(SAVED.nqMode === "find" ? "find" : "name");
-
   /* -------- Cloud sync (Supabase) + local persistence -------- */
   const [user, setUser] = useState(null);
   const [syncStatus, setSyncStatus] = useState("local"); // local | saving | synced | error
@@ -486,10 +478,6 @@ export default function FretLab() {
     if (typeof d.bpm === "number") setBpm(Math.max(40, Math.min(200, d.bpm)));
     if (typeof d.droneVol === "number") setDroneVol(Math.max(0.03, Math.min(0.35, d.droneVol)));
     if ([2, 3, 4, 6].includes(d.beatsPerBar)) setBeatsPerBar(d.beatsPerBar);
-    if (d.nqStats && typeof d.nqStats === "object") setNqStats(d.nqStats);
-    if (d.nqScore && typeof d.nqScore === "object") setNqScore(d.nqScore);
-    if ([5, 12, 15].includes(d.nqRange)) setNqRange(d.nqRange);
-    if (["name", "find"].includes(d.nqMode)) setNqMode(d.nqMode);
     setProgSeventh(!!d.progSeventh);
     if (Array.isArray(d.prog)) setProg(d.prog);
     if (Array.isArray(d.savedProgs)) setSavedProgs(d.savedProgs);
@@ -594,7 +582,6 @@ export default function FretLab() {
       bpm, progSeventh, prog, savedProgs,
       earMode, earPoolName, earStats, earScore,
       droneVol, beatsPerBar,
-      nqStats, nqScore, nqRange, nqMode,
       _ts: Date.now(),
     };
     persist(blob);
@@ -605,7 +592,6 @@ export default function FretLab() {
     bpm, progSeventh, prog, savedProgs,
     earMode, earPoolName, earStats, earScore,
     droneVol, beatsPerBar,
-    nqStats, nqScore, nqRange, nqMode,
   ]);
 
   const saveCurrentProg = () => {
@@ -808,9 +794,8 @@ export default function FretLab() {
   };
 
   useEffect(() => {
-    if (tab !== "tuner" && tab !== "ear" && tab !== "notes") stopMic();
+    if (tab !== "tuner" && tab !== "ear") stopMic();
     if (tab !== "ear" && earInput === "guitar") setEarInput("buttons");
-    if (tab !== "notes" && nqInput === "guitar") setNqInput("buttons");
     // eslint-disable-next-line
   }, [tab]);
   useEffect(() => stopMic, []); // eslint-disable-line
@@ -943,89 +928,6 @@ export default function FretLab() {
     // eslint-disable-next-line
   }, [powerOn]);
   useEffect(() => () => { stopDrone(); stopMetro(); }, []); // eslint-disable-line
-
-  /* -------- Note quiz logic -------- */
-  const [nq, setNq] = useState(null);
-  const [nqPicked, setNqPicked] = useState(null);
-  const [nqClicked, setNqClicked] = useState(null);
-  const [nqInput, setNqInput] = useState("buttons");
-  const nqRef = useRef(null);
-  const nqPickedRef = useRef(null);
-  const nqTimeRef = useRef(0);
-  const nqHoldRef = useRef({ pc: null, count: 0 });
-  const answerNqRef = useRef(null);
-  useEffect(() => { nqRef.current = nq; }, [nq]);
-  useEffect(() => { nqPickedRef.current = nqPicked; }, [nqPicked]);
-
-  const nextNq = () => {
-    const s = Math.floor(Math.random() * 6);
-    const f = Math.floor(Math.random() * (nqRange + 1));
-    const pc = (tuning[s] + f) % 12;
-    setNq(nqMode === "name" ? { kind: "name", s, f, pc } : { kind: "find", s, pc });
-    setNqPicked(null);
-    setNqClicked(null);
-    nqTimeRef.current = Date.now();
-    nqHoldRef.current = { pc: null, count: 0 };
-  };
-
-  const answerNq = (pc, clicked = null) => {
-    if (!nq || nqPicked !== null) return;
-    setNqPicked(pc);
-    if (clicked) setNqClicked(clicked);
-    const ok = pc === nq.pc;
-    setNqStats((s) => ({
-      ...s,
-      [nq.pc]: {
-        asked: (s[nq.pc]?.asked || 0) + 1,
-        correct: (s[nq.pc]?.correct || 0) + (ok ? 1 : 0),
-      },
-    }));
-    setNqScore((sc) => {
-      const streak = ok ? sc.streak + 1 : 0;
-      return {
-        correct: sc.correct + (ok ? 1 : 0),
-        total: sc.total + 1,
-        streak,
-        best: Math.max(sc.best, streak),
-      };
-    });
-    // reinforcement: hear the target
-    const fret =
-      nq.kind === "name"
-        ? nq.f
-        : Array.from({ length: nqRange + 1 }, (_, i) => i).find(
-            (i) => (tuning[nq.s] + i) % 12 === nq.pc
-          ) ?? 0;
-    pluck(midiFreq(tuning[nq.s] + fret), 0.15, 0.28);
-  };
-  answerNqRef.current = answerNq;
-
-  const onNqReading = (r) => {
-    setEarLive(r);
-    const q = nqRef.current;
-    if (!r || !q || nqPickedRef.current !== null) {
-      nqHoldRef.current = { pc: null, count: 0 };
-      return;
-    }
-    if (Date.now() - nqTimeRef.current < 800) return;
-    if (Math.abs(r.cents) > 35) return;
-    const pc = ((r.midi % 12) + 12) % 12;
-    if (nqHoldRef.current.pc === pc) nqHoldRef.current.count++;
-    else nqHoldRef.current = { pc, count: 1 };
-    if (nqHoldRef.current.count >= 5) {
-      answerNqRef.current(pc);
-      nqHoldRef.current = { pc: null, count: 0 };
-    }
-  };
-
-  const setNqInputMode = (m) => {
-    setNqInput(m);
-    setNq(null);
-    setNqPicked(null);
-    setNqClicked(null);
-    if (m === "guitar") startMic("notes", onNqReading);
-    else if (micUser === "notes") stopMic();
-  };
   const activeIntervals = tab === "chords" ? CHORDS[chordName] : SCALES[scaleName];
   const pcs = useMemo(
     () => new Set(activeIntervals.map((i) => (root + i) % 12)),
@@ -1142,7 +1044,6 @@ export default function FretLab() {
             ["prog", "PROGRESSIONS"],
             ["circle", "CIRCLE OF 5THS"],
             ["ear", "EAR TRAINER"],
-            ["notes", "NOTE QUIZ"],
             ["tuner", "TUNER"],
           ].map(([id, label]) => (
             <button
@@ -2273,250 +2174,6 @@ export default function FretLab() {
         </section>
       )}
 
-      {/* ============ NOTE QUIZ ============ */}
-      {tab === "notes" && (
-        <section className="ear-wrap nq-wrap">
-          <div className="ear-panel">
-            <div className="ear-controls">
-              <div className="ctl">
-                <label>MODE</label>
-                <div className="seg">
-                  <button
-                    className={nqMode === "name" ? "on" : ""}
-                    onClick={() => { setNqMode("name"); setNq(null); setNqPicked(null); }}
-                  >
-                    NAME THE FRET
-                  </button>
-                  <button
-                    className={nqMode === "find" ? "on" : ""}
-                    onClick={() => { setNqMode("find"); setNq(null); setNqPicked(null); }}
-                  >
-                    FIND THE NOTE
-                  </button>
-                </div>
-              </div>
-              <div className="ctl">
-                <label>FRETS</label>
-                <div className="seg">
-                  {[5, 12, 15].map((r) => (
-                    <button
-                      key={r}
-                      className={nqRange === r ? "on" : ""}
-                      onClick={() => { setNqRange(r); setNq(null); setNqPicked(null); }}
-                    >
-                      0–{r}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div className="ctl">
-                <label>ANSWER WITH</label>
-                <div className="seg">
-                  <button className={nqInput === "buttons" ? "on" : ""} onClick={() => setNqInputMode("buttons")}>
-                    {nqMode === "find" ? "TAPPING" : "BUTTONS"}
-                  </button>
-                  <button className={nqInput === "guitar" ? "on" : ""} onClick={() => setNqInputMode("guitar")}>
-                    🎸 GUITAR
-                  </button>
-                </div>
-              </div>
-              <div className="ear-score">
-                <div className="meter-box">
-                  <span className="meter-num">
-                    {nqScore.total ? Math.round((100 * nqScore.correct) / nqScore.total) : "—"}
-                  </span>
-                  <span className="meter-lab">% HIT</span>
-                </div>
-                <div className="meter-box">
-                  <span className="meter-num">{nqScore.streak}</span>
-                  <span className="meter-lab">STREAK</span>
-                </div>
-                <div className="meter-box">
-                  <span className="meter-num">{nqScore.best}</span>
-                  <span className="meter-lab">BEST</span>
-                </div>
-              </div>
-            </div>
-
-            <div className="ear-stage">
-              {micErr && nqInput === "guitar" && <p className="tip mic-err">{micErr}</p>}
-
-              {!nq ? (
-                <button className="ear-big" onClick={nextNq}>▶ FIRST QUESTION</button>
-              ) : (
-                <div className="nq-prompt">
-                  {nq.kind === "name" ? (
-                    <span className="ear-prompt">
-                      WHAT NOTE IS MARKED
-                      {nqInput === "guitar" ? " — PLAY IT ON YOUR GUITAR" : "?"}
-                    </span>
-                  ) : (
-                    <span className="ear-prompt">
-                      FIND <strong>{disp(NOTES[nq.pc], useFlats)}</strong> ON STRING{" "}
-                      {6 - nq.s} (
-                      {disp(NOTES[tuning[nq.s] % 12], useFlats)} string)
-                      {nqInput === "guitar" && " — PLAY IT"}
-                    </span>
-                  )}
-                </div>
-              )}
-
-              {nqInput === "guitar" && micOn && (
-                <div className={`live-pill ${earLive ? "hot" : ""}`}>
-                  {earLive ? `HEARING: ${earLive.note}${earLive.octave}` : "listening…"}
-                </div>
-              )}
-
-              {/* quiz board */}
-              {nq && (
-                <div className="board-scroll">
-                  <div className="board qboard" style={{ minWidth: nqRange > 5 ? 940 : 560 }}>
-                    <div className="fretnums">
-                      <div className="fn nut-col" />
-                      {Array.from({ length: nqRange }, (_, f) => (
-                        <div key={f} className="fn">{f + 1}</div>
-                      ))}
-                    </div>
-                    <div className="neck">
-                      <div className="inlay-layer">
-                        <div className="nut-col" />
-                        {Array.from({ length: nqRange }, (_, i) => {
-                          const f = i + 1;
-                          return (
-                            <div key={f} className="inlay-cell">
-                              {inlays[f] === 1 && <span className="dot" />}
-                              {inlays[f] === 2 && (
-                                <>
-                                  <span className="dot d12a" />
-                                  <span className="dot d12b" />
-                                </>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                      {[...tuning].reverse().map((openMidi, sIdx) => {
-                        const origIdx = tuning.length - 1 - sIdx;
-                        const isTargetRow = nq.kind === "find" && origIdx === nq.s;
-                        const rowDim = nq.kind === "find" && !isTargetRow;
-                        return (
-                          <div className={`string-row ${rowDim ? "qdim" : ""}`} key={sIdx}>
-                            <div className="string-line" style={{ height: 1 + sIdx * 0.55 }} />
-                            {Array.from({ length: nqRange + 1 }, (_, fret) => {
-                              const pc = (openMidi + fret) % 12;
-                              let marker = null;
-                              if (nq.kind === "name" && origIdx === nq.s && fret === nq.f) {
-                                marker = (
-                                  <span className={`marker ${nqPicked !== null ? (nqPicked === nq.pc ? "qgood" : "qbad") : "qmark"}`}>
-                                    {nqPicked !== null ? disp(NOTES[nq.pc], useFlats) : "?"}
-                                  </span>
-                                );
-                              }
-                              if (nq.kind === "find" && nqPicked !== null && isTargetRow) {
-                                if (pc === nq.pc) {
-                                  marker = <span className="marker qgood">{disp(NOTES[pc], useFlats)}</span>;
-                                } else if (nqClicked && nqClicked.f === fret) {
-                                  marker = <span className="marker qbad">{disp(NOTES[pc], useFlats)}</span>;
-                                }
-                              }
-                              return (
-                                <div
-                                  key={fret}
-                                  className={`cell ${fret === 0 ? "nut-col open-cell" : ""} ${
-                                    isTargetRow && nqPicked === null && nqInput !== "guitar" ? "qclickable" : ""
-                                  }`}
-                                  onClick={() => {
-                                    if (nq.kind !== "find" || nqPicked !== null || nqInput === "guitar") return;
-                                    if (origIdx !== nq.s) return;
-                                    answerNq(pc, { s: origIdx, f: fret });
-                                  }}
-                                >
-                                  {marker}
-                                </div>
-                              );
-                            })}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {/* name-mode answer buttons */}
-              {nq && nq.kind === "name" && nqInput !== "guitar" && (
-                <div className="nq-answers">
-                  {NOTES.map((n, pc) => {
-                    let cls = "";
-                    if (nqPicked !== null) {
-                      if (pc === nq.pc) cls = "good";
-                      else if (pc === nqPicked) cls = "bad";
-                      else cls = "off";
-                    }
-                    return (
-                      <button
-                        key={n}
-                        className={`ear-ans nq-ans ${cls}`}
-                        disabled={nqPicked !== null && pc !== nq.pc && pc !== nqPicked}
-                        onClick={() => answerNq(pc)}
-                      >
-                        <span className="ea-short">{disp(n, useFlats)}</span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-
-              {nqPicked !== null && nq && (
-                <div className={`ear-verdict ${nqPicked === nq.pc ? "yes" : "no"}`}>
-                  <div className="ev-head">
-                    {nqPicked === nq.pc
-                      ? "NAILED IT."
-                      : nq.kind === "name"
-                      ? `NOT QUITE — that's ${disp(NOTES[nq.pc], useFlats)}.`
-                      : `NOT QUITE — you hit ${disp(NOTES[nqPicked], useFlats)}; the ${disp(NOTES[nq.pc], useFlats)}s are marked.`}
-                  </div>
-                  <button className="play-btn" onClick={nextNq}>NEXT →</button>
-                </div>
-              )}
-            </div>
-
-            {Object.keys(nqStats).length > 0 && (
-              <div className="ear-stats">
-                <div className="stats-head">
-                  <div className="dia-label">ACCURACY BY NOTE</div>
-                  <button
-                    className="reset-stats"
-                    onClick={() => {
-                      setNqStats({});
-                      setNqScore({ correct: 0, total: 0, streak: 0, best: 0 });
-                    }}
-                  >
-                    RESET STATS
-                  </button>
-                </div>
-                {Object.entries(nqStats)
-                  .sort((a, b) => Number(a[0]) - Number(b[0]))
-                  .map(([pc, s]) => {
-                    const pct = Math.round((100 * s.correct) / s.asked);
-                    return (
-                      <div className="stat-row" key={pc}>
-                        <span className="stat-name">{disp(NOTES[pc], useFlats)}</span>
-                        <span className="stat-bar">
-                          <span className="stat-fill" style={{ width: `${pct}%` }} />
-                        </span>
-                        <span className="stat-pct">
-                          {pct}% <em>({s.correct}/{s.asked})</em>
-                        </span>
-                      </div>
-                    );
-                  })}
-              </div>
-            )}
-          </div>
-        </section>
-      )}
-
       <footer className="foot">
         HAND-WIRED IN THE THEORY DEPARTMENT · NO TRANSISTORS WERE HARMED
       </footer>
@@ -3000,39 +2657,6 @@ const CSS = `
   box-shadow: 0 0 12px rgba(255,180,84,0.3);
 }
 .ev-played { font-family: Georgia, serif; font-style: italic; font-size: 14px; color: #cbbfa6; margin-top: 6px; }
-
-/* ---------- note quiz ---------- */
-.nq-wrap { max-width: 1080px; }
-.nq-prompt { margin-bottom: 12px; }
-.qboard { margin: 6px auto 14px; }
-.string-row.qdim { opacity: 0.22; }
-.cell.qclickable { cursor: pointer; }
-.cell.qclickable:hover { background: rgba(255,180,84,0.14); }
-.marker.qmark {
-  background: radial-gradient(circle at 35% 30%, #fff3dd, var(--amber));
-  color: #241b0e; font-size: 14px;
-  box-shadow: 0 0 16px rgba(255,180,84,0.9), 0 2px 5px rgba(0,0,0,0.6);
-  animation: qpulse 1.2s ease-in-out infinite;
-}
-@keyframes qpulse {
-  0%, 100% { transform: scale(1); }
-  50% { transform: scale(1.18); }
-}
-.marker.qgood {
-  background: radial-gradient(circle at 35% 30%, #c9f0c2, #5cb254);
-  color: #10250d;
-  box-shadow: 0 0 14px rgba(125,194,125,0.7), 0 2px 5px rgba(0,0,0,0.6);
-}
-.marker.qbad {
-  background: radial-gradient(circle at 35% 30%, #f0c2b8, #b2544a);
-  color: #250f0d;
-  box-shadow: 0 0 12px rgba(194,125,115,0.6), 0 2px 5px rgba(0,0,0,0.6);
-}
-.nq-answers { display: flex; flex-wrap: wrap; gap: 7px; justify-content: center; margin: 4px 0; }
-.nq-ans { min-width: 52px; padding: 10px 8px; }
-@media (prefers-reduced-motion: reduce) {
-  .marker.qmark { animation: none; }
-}
 .ear-answers {
   display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin: 8px 0 4px;
 }
