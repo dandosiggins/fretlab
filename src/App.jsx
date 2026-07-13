@@ -1,6 +1,7 @@
 import { useState, useRef, useMemo, useEffect } from "react";
 import { supabase } from "./supabase.js";
 import GearVault from "./GearVault.jsx";
+import LessonLog from "./LessonLog.jsx";
 
 /* ============================================================
    FRETLAB — Guitar Theory Workstation
@@ -1305,6 +1306,7 @@ chord("<${syms.join(" ")}>")
             ["notes", "NOTE QUIZ"],
             ["tuner", "TUNER"],
             ["gear", "GEAR"],
+            ["lessons", "LESSONS"],
           ].map(([id, label]) => (
             <button
               key={id}
@@ -2753,6 +2755,9 @@ chord("<${syms.join(" ")}>")
 
       {/* ============ GEAR VAULT ============ */}
       {tab === "gear" && <GearVault />}
+
+      {/* ============ LESSON LOG ============ */}
+      {tab === "lessons" && <LessonLog />}
 
       <footer className="foot">
         HAND-WIRED IN THE THEORY DEPARTMENT · NO TRANSISTORS WERE HARMED
