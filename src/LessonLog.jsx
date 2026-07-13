@@ -104,7 +104,8 @@ const photoPath = (userId, pid) => `${userId}/${pid}.jpg`;
 async function cloudUpsertSong(userId, s) {
   const { error } = await supabase.from("lesson_songs").upsert({
     id: s.id, user_id: userId, title: s.title, artist: s.artist, status: s.status,
-    tuning: s.tuning, song_key: s.key, notes: s.notes, updated_at: s.updatedAt,
+    tuning: s.tuning, song_key: s.key, notes: s.notes,
+    photo_ids: s.photoIds || [], updated_at: s.updatedAt,
   });
   if (error) throw error;
 }
@@ -116,9 +117,12 @@ async function cloudUpsertLesson(userId, l) {
   });
   if (error) throw error;
 }
-async function cloudDeleteSong(id) {
-  const { error } = await supabase.from("lesson_songs").delete().eq("id", id);
+async function cloudDeleteSong(userId, s) {
+  const { error } = await supabase.from("lesson_songs").delete().eq("id", s.id);
   if (error) throw error;
+  if (s.photoIds?.length) {
+    await supabase.storage.from("lesson-images").remove(s.photoIds.map((p) => photoPath(userId, p)));
+  }
 }
 async function cloudDeleteLesson(userId, l) {
   const { error } = await supabase.from("lessons").delete().eq("id", l.id);
@@ -301,13 +305,46 @@ function parseTechniques(t) {
 }
 
 /* ---------- song form modal ---------- */
-function SongModal({ song, onSave, onCancel }) {
+function SongModal({ song, thumbs, onSave, onCancel }) {
   const [title, setTitle] = useState(song?.title || "");
   const [artist, setArtist] = useState(song?.artist || "");
   const [status, setStatus] = useState(song?.status || "learning");
   const [tuning, setTuning] = useState(song?.tuning || "");
   const [key, setKey] = useState(song?.key || "");
   const [notes, setNotes] = useState(song?.notes || "");
+  const [photoIds, setPhotoIds] = useState(song?.photoIds || []);
+  const [newPhotos, setNewPhotos] = useState({});
+  const [removedPhotos, setRemovedPhotos] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const fileRef = useRef(null);
+
+  const handleFiles = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+    setBusy(true);
+    const added = {};
+    const ids = [];
+    for (const f of files) {
+      try {
+        const pid = uid();
+        added[pid] = await processPhoto(f);
+        ids.push(pid);
+      } catch (err) { console.error("Photo failed", err); }
+    }
+    setNewPhotos((p) => ({ ...p, ...added }));
+    setPhotoIds((p) => [...p, ...ids]);
+    setBusy(false);
+  };
+
+  const removePhoto = (pid) => {
+    setPhotoIds(photoIds.filter((x) => x !== pid));
+    if (newPhotos[pid]) {
+      setNewPhotos((p) => { const q = { ...p }; delete q[pid]; return q; });
+    } else {
+      setRemovedPhotos((r) => [...r, pid]);
+    }
+  };
 
   const submit = () => {
     if (!title.trim()) return;
@@ -315,8 +352,9 @@ function SongModal({ song, onSave, onCancel }) {
       id: song?.id || uid(),
       title: title.trim(), artist: artist.trim(), status,
       tuning: tuning.trim(), key: key.trim(), notes: notes.trim(),
+      photoIds,
       updatedAt: new Date().toISOString(),
-    });
+    }, newPhotos, removedPhotos);
   };
 
   return (
@@ -353,6 +391,34 @@ function SongModal({ song, onSave, onCancel }) {
         <label style={S.label}>Notes</label>
         <textarea style={{ ...S.input, minHeight: 70, resize: "vertical", fontFamily: "inherit" }}
           value={notes} onChange={(e) => setNotes(e.target.value)} placeholder="Tricky sections, tempo goals, chart links…" />
+
+        <label style={S.label}>Photos (charts, tabs, whiteboard)</label>
+        {photoIds.length > 0 && (
+          <div style={{ ...S.photoRow, marginTop: 4, marginBottom: 8 }}>
+            {photoIds.map((pid) => {
+              const src = newPhotos[pid]?.thumb || thumbs[pid];
+              return (
+                <div key={pid} style={{ position: "relative" }}>
+                  {src
+                    ? <img src={src} alt="song reference" style={S.photoThumb} />
+                    : <div style={S.photoPlaceholder}>photo<br />(in cloud)</div>}
+                  <span
+                    onClick={() => removePhoto(pid)}
+                    style={{
+                      position: "absolute", top: -6, right: -6, width: 20, height: 20,
+                      borderRadius: "50%", background: "#5A2622", color: "#F0C9C2",
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: 12, fontWeight: 700, cursor: "pointer", border: "1px solid #6E332C",
+                    }}>×</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <button style={S.btn(false)} onClick={() => fileRef.current?.click()} disabled={busy}>
+          {busy ? "Processing…" : "+ Add photos"}
+        </button>
+        <input ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={handleFiles} />
 
         <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
           <button style={{ ...S.btn(true), flex: 1, opacity: title.trim() ? 1 : 0.5 }} onClick={submit} disabled={!title.trim()}>
@@ -529,6 +595,12 @@ export default function LessonLog() {
           if (d) t[pid] = d;
         }
       }
+      for (const s of local.songs || []) {
+        for (const pid of s.photoIds || []) {
+          const d = lsGet(lsThumbKey(pid));
+          if (d) t[pid] = d;
+        }
+      }
       setThumbs(t);
     }
   }, []);
@@ -578,7 +650,9 @@ export default function LessonLog() {
 
         const [mSongs, upSongs] = mergeRows(local.songs || [], cSongs, (c) => ({
           id: c.id, title: c.title, artist: c.artist, status: c.status,
-          tuning: c.tuning, key: c.song_key, notes: c.notes, updatedAt: c.updated_at,
+          tuning: c.tuning, key: c.song_key, notes: c.notes,
+          photoIds: Array.isArray(c.photo_ids) ? c.photo_ids : [],
+          updatedAt: c.updated_at,
         }));
         const [mLessons, upLessons] = mergeRows(local.lessons || [], cLessons, (c) => ({
           id: c.id, date: c.lesson_date, notes: c.notes, techniques: c.techniques,
@@ -592,7 +666,13 @@ export default function LessonLog() {
         setLessons(mLessons);
         writeLocal(mSongs, mLessons);
 
-        for (const s of upSongs) await cloudUpsertSong(userId, s);
+        for (const s of upSongs) {
+          await cloudUpsertSong(userId, s);
+          for (const pid of s.photoIds || []) {
+            const full = lsGet(lsFullKey(pid));
+            if (full) await cloudUploadPhoto(userId, pid, full);
+          }
+        }
         for (const l of upLessons) {
           await cloudUpsertLesson(userId, l);
           for (const pid of l.photoIds || []) {
@@ -609,13 +689,31 @@ export default function LessonLog() {
   }, [userId]);
 
   /* --- songs --- */
-  const handleSaveSong = (song) => {
+  const handleSaveSong = (song, newPhotos, removedPhotos) => {
+    for (const [pid, imgs] of Object.entries(newPhotos || {})) {
+      lsSet(lsThumbKey(pid), imgs.thumb);
+      lsSet(lsFullKey(pid), imgs.full);
+      setThumbs((t) => ({ ...t, [pid]: imgs.thumb }));
+      setFulls((f) => ({ ...f, [pid]: imgs.full }));
+    }
+    for (const pid of removedPhotos || []) {
+      lsDel(lsThumbKey(pid));
+      lsDel(lsFullKey(pid));
+    }
     const exists = songs.some((s) => s.id === song.id);
     const newSongs = exists ? songs.map((s) => (s.id === song.id ? song : s)) : [song, ...songs];
     setSongs(newSongs);
     writeLocal(newSongs, lessons);
     setEditingSong(null);
-    runCloud(() => cloudUpsertSong(userId, song));
+    runCloud(async () => {
+      await cloudUpsertSong(userId, song);
+      for (const [pid, imgs] of Object.entries(newPhotos || {})) {
+        await cloudUploadPhoto(userId, pid, imgs.full);
+      }
+      if (removedPhotos?.length) {
+        await supabase.storage.from("lesson-images").remove(removedPhotos.map((p) => photoPath(userId, p)));
+      }
+    });
   };
 
   const quickStatus = (song, status) => {
@@ -629,6 +727,10 @@ export default function LessonLog() {
       ? `Remove "${song.title}"? It's linked to ${lessonCount} lesson(s); those entries will keep their notes but lose the song link.`
       : `Remove "${song.title}"?`;
     if (!window.confirm(msg)) return;
+    for (const pid of song.photoIds || []) {
+      lsDel(lsThumbKey(pid));
+      lsDel(lsFullKey(pid));
+    }
     const newSongs = songs.filter((s) => s.id !== song.id);
     const newLessons = lessons.map((l) =>
       l.songIds?.includes(song.id) ? { ...l, songIds: l.songIds.filter((x) => x !== song.id) } : l);
@@ -636,7 +738,7 @@ export default function LessonLog() {
     setLessons(newLessons);
     writeLocal(newSongs, newLessons);
     runCloud(async () => {
-      await cloudDeleteSong(song.id);
+      await cloudDeleteSong(userId, song);
       for (const l of newLessons) {
         const old = lessons.find((x) => x.id === l.id);
         if (old && old.songIds?.includes(song.id)) await cloudUpsertLesson(userId, l);
@@ -815,6 +917,18 @@ export default function LessonLog() {
                   </div>
                   {count > 0 && <div style={{ ...S.meta, marginTop: 4 }}>{count} lesson{count !== 1 ? "s" : ""}</div>}
                   {song.notes && <div style={{ ...S.meta, fontSize: 11, lineHeight: 1.5 }}>{song.notes}</div>}
+                  {(song.photoIds || []).length > 0 && (
+                    <div style={S.photoRow}>
+                      {song.photoIds.map((pid, idx) => (
+                        thumbs[pid]
+                          ? <img key={pid} src={thumbs[pid]} alt="song reference" style={S.photoThumb}
+                              onClick={() => openLightbox(song.photoIds, idx)} />
+                          : <div key={pid} style={S.photoPlaceholder} onClick={() => openLightbox(song.photoIds, idx)}>
+                              photo<br />(tap to load)
+                            </div>
+                      ))}
+                    </div>
+                  )}
                   <div style={S.cardActions}>
                     <button style={S.smallBtn(false)} onClick={() => setEditingSong(song)}>Edit</button>
                     <button style={S.smallBtn(true)} onClick={() => handleDeleteSong(song)}>Remove</button>
@@ -910,7 +1024,7 @@ export default function LessonLog() {
 
       {/* ---- modals ---- */}
       {editingSong && (
-        <SongModal song={editingSong === "new" ? null : editingSong} onSave={handleSaveSong} onCancel={() => setEditingSong(null)} />
+        <SongModal song={editingSong === "new" ? null : editingSong} thumbs={thumbs} onSave={handleSaveSong} onCancel={() => setEditingSong(null)} />
       )}
       {editingLesson && (
         <LessonModal
