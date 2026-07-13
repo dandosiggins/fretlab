@@ -17,10 +17,27 @@ import { supabase } from "./supabase";
 const LS_DATA = "fretlab-lessons";
 const lsThumbKey = (pid) => `fretlab-lesson-thumb-${pid}`;
 const lsFullKey = (pid) => `fretlab-lesson-full-${pid}`;
+const lsDocKey = (did) => `fretlab-lesson-doc-${did}`;
+const MAX_DOC_BYTES = 8 * 1024 * 1024;
+
+function fileToDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = reject;
+    r.readAsDataURL(file);
+  });
+}
+function normalizeUrl(u) {
+  const s = (u || "").trim();
+  if (!s) return "";
+  return /^https?:\/\//i.test(s) ? s : "https://" + s;
+}
 const uid = () => Math.random().toString(36).slice(2, 9) + Date.now().toString(36);
 const todayStr = () => new Date().toISOString().slice(0, 10);
 
 const STATUSES = [
+  { id: "wishlist", label: "Want to learn", color: "#8E44AD" },
   { id: "learning", label: "Learning", color: "#D9A63B" },
   { id: "working", label: "Working on it", color: "#2E86C1" },
   { id: "repertoire", label: "Repertoire", color: "#3FA34D" },
@@ -100,12 +117,25 @@ function blobToDataUrl(blob) {
 
 /* ---------- cloud helpers ---------- */
 const photoPath = (userId, pid) => `${userId}/${pid}.jpg`;
+const docPath = (userId, did) => `${userId}/${did}`;
+
+async function cloudUploadDoc(userId, did, dataUrl, mime) {
+  const { error } = await supabase.storage.from("lesson-images")
+    .upload(docPath(userId, did), dataUrlToBlob(dataUrl), { upsert: true, contentType: mime || "application/octet-stream" });
+  if (error) throw error;
+}
+async function cloudDownloadDoc(userId, did) {
+  const { data, error } = await supabase.storage.from("lesson-images").download(docPath(userId, did));
+  if (error || !data) return null;
+  return blobToDataUrl(data);
+}
 
 async function cloudUpsertSong(userId, s) {
   const { error } = await supabase.from("lesson_songs").upsert({
     id: s.id, user_id: userId, title: s.title, artist: s.artist, status: s.status,
     tuning: s.tuning, song_key: s.key, notes: s.notes,
-    photo_ids: s.photoIds || [], updated_at: s.updatedAt,
+    photo_ids: s.photoIds || [], links: s.links || [], docs: s.docs || [],
+    updated_at: s.updatedAt,
   });
   if (error) throw error;
 }
@@ -120,8 +150,12 @@ async function cloudUpsertLesson(userId, l) {
 async function cloudDeleteSong(userId, s) {
   const { error } = await supabase.from("lesson_songs").delete().eq("id", s.id);
   if (error) throw error;
-  if (s.photoIds?.length) {
-    await supabase.storage.from("lesson-images").remove(s.photoIds.map((p) => photoPath(userId, p)));
+  const paths = [
+    ...(s.photoIds || []).map((p) => photoPath(userId, p)),
+    ...(s.docs || []).map((d) => docPath(userId, d.id)),
+  ];
+  if (paths.length) {
+    await supabase.storage.from("lesson-images").remove(paths);
   }
 }
 async function cloudDeleteLesson(userId, l) {
@@ -315,8 +349,56 @@ function SongModal({ song, thumbs, onSave, onCancel }) {
   const [photoIds, setPhotoIds] = useState(song?.photoIds || []);
   const [newPhotos, setNewPhotos] = useState({});
   const [removedPhotos, setRemovedPhotos] = useState([]);
+  const [links, setLinks] = useState(song?.links || []);
+  const [linkLabel, setLinkLabel] = useState("");
+  const [linkUrl, setLinkUrl] = useState("");
+  const [docs, setDocs] = useState(song?.docs || []);
+  const [newDocs, setNewDocs] = useState({});
+  const [removedDocs, setRemovedDocs] = useState([]);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
+  const docRef = useRef(null);
+
+  const addLink = () => {
+    const url = normalizeUrl(linkUrl);
+    if (!url) return;
+    setLinks([...links, { id: uid(), label: linkLabel.trim() || url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 40), url }]);
+    setLinkLabel("");
+    setLinkUrl("");
+  };
+  const removeLink = (id) => setLinks(links.filter((l) => l.id !== id));
+
+  const handleDocs = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+    setBusy(true);
+    const added = {};
+    const metas = [];
+    for (const f of files) {
+      if (f.size > MAX_DOC_BYTES) {
+        window.alert(`"${f.name}" is over 8 MB — too large to attach. Link to it instead.`);
+        continue;
+      }
+      try {
+        const did = uid();
+        added[did] = { dataUrl: await fileToDataUrl(f), name: f.name, mime: f.type || "application/octet-stream" };
+        metas.push({ id: did, name: f.name, mime: f.type || "application/octet-stream" });
+      } catch (err) { console.error("Doc failed", err); }
+    }
+    setNewDocs((p) => ({ ...p, ...added }));
+    setDocs((p) => [...p, ...metas]);
+    setBusy(false);
+  };
+
+  const removeDoc = (did) => {
+    setDocs(docs.filter((d) => d.id !== did));
+    if (newDocs[did]) {
+      setNewDocs((p) => { const q = { ...p }; delete q[did]; return q; });
+    } else {
+      setRemovedDocs((r) => [...r, did]);
+    }
+  };
 
   const handleFiles = async (e) => {
     const files = Array.from(e.target.files || []);
@@ -352,9 +434,9 @@ function SongModal({ song, thumbs, onSave, onCancel }) {
       id: song?.id || uid(),
       title: title.trim(), artist: artist.trim(), status,
       tuning: tuning.trim(), key: key.trim(), notes: notes.trim(),
-      photoIds,
+      photoIds, links, docs,
       updatedAt: new Date().toISOString(),
-    }, newPhotos, removedPhotos);
+    }, newPhotos, removedPhotos, newDocs, removedDocs);
   };
 
   return (
@@ -419,6 +501,40 @@ function SongModal({ song, thumbs, onSave, onCancel }) {
           {busy ? "Processing…" : "+ Add photos"}
         </button>
         <input ref={fileRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={handleFiles} />
+
+        <label style={S.label}>Links (lessons, tabs, videos)</label>
+        {links.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+            {links.map((l) => (
+              <span key={l.id} style={{ ...S.chip(false, "#2E86C1"), cursor: "default", padding: "5px 10px" }}>
+                🔗 {l.label}
+                <span style={{ cursor: "pointer", color: "#D8776C", marginLeft: 4, fontWeight: 700 }} onClick={() => removeLink(l.id)}>×</span>
+              </span>
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          <input style={{ ...S.input, flex: 1 }} placeholder="Label (optional)" value={linkLabel} onChange={(e) => setLinkLabel(e.target.value)} />
+          <input style={{ ...S.input, flex: 2 }} placeholder="URL" value={linkUrl}
+            onChange={(e) => setLinkUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addLink()} />
+          <button style={S.btn(false)} onClick={addLink} disabled={!linkUrl.trim()}>Add</button>
+        </div>
+
+        <label style={S.label}>Documents (PDF tabs, charts — up to 8 MB)</label>
+        {docs.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+            {docs.map((d) => (
+              <span key={d.id} style={{ ...S.chip(false, "#D4A73B"), cursor: "default", padding: "5px 10px" }}>
+                📄 {d.name}
+                <span style={{ cursor: "pointer", color: "#D8776C", marginLeft: 4, fontWeight: 700 }} onClick={() => removeDoc(d.id)}>×</span>
+              </span>
+            ))}
+          </div>
+        )}
+        <button style={S.btn(false)} onClick={() => docRef.current?.click()} disabled={busy}>
+          {busy ? "Processing…" : "+ Attach documents"}
+        </button>
+        <input ref={docRef} type="file" accept=".pdf,.doc,.docx,.txt,.gp,.gpx,.gp5,.ptb,.musicxml,.xml" multiple style={{ display: "none" }} onChange={handleDocs} />
 
         <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
           <button style={{ ...S.btn(true), flex: 1, opacity: title.trim() ? 1 : 0.5 }} onClick={submit} disabled={!title.trim()}>
@@ -652,6 +768,8 @@ export default function LessonLog() {
           id: c.id, title: c.title, artist: c.artist, status: c.status,
           tuning: c.tuning, key: c.song_key, notes: c.notes,
           photoIds: Array.isArray(c.photo_ids) ? c.photo_ids : [],
+          links: Array.isArray(c.links) ? c.links : [],
+          docs: Array.isArray(c.docs) ? c.docs : [],
           updatedAt: c.updated_at,
         }));
         const [mLessons, upLessons] = mergeRows(local.lessons || [], cLessons, (c) => ({
@@ -672,6 +790,10 @@ export default function LessonLog() {
             const full = lsGet(lsFullKey(pid));
             if (full) await cloudUploadPhoto(userId, pid, full);
           }
+          for (const d of s.docs || []) {
+            const data = lsGet(lsDocKey(d.id));
+            if (data) await cloudUploadDoc(userId, d.id, data, d.mime);
+          }
         }
         for (const l of upLessons) {
           await cloudUpsertLesson(userId, l);
@@ -689,7 +811,7 @@ export default function LessonLog() {
   }, [userId]);
 
   /* --- songs --- */
-  const handleSaveSong = (song, newPhotos, removedPhotos) => {
+  const handleSaveSong = (song, newPhotos, removedPhotos, newDocs, removedDocs) => {
     for (const [pid, imgs] of Object.entries(newPhotos || {})) {
       lsSet(lsThumbKey(pid), imgs.thumb);
       lsSet(lsFullKey(pid), imgs.full);
@@ -699,6 +821,12 @@ export default function LessonLog() {
     for (const pid of removedPhotos || []) {
       lsDel(lsThumbKey(pid));
       lsDel(lsFullKey(pid));
+    }
+    for (const [did, doc] of Object.entries(newDocs || {})) {
+      lsSet(lsDocKey(did), doc.dataUrl);
+    }
+    for (const did of removedDocs || []) {
+      lsDel(lsDocKey(did));
     }
     const exists = songs.some((s) => s.id === song.id);
     const newSongs = exists ? songs.map((s) => (s.id === song.id ? song : s)) : [song, ...songs];
@@ -710,8 +838,15 @@ export default function LessonLog() {
       for (const [pid, imgs] of Object.entries(newPhotos || {})) {
         await cloudUploadPhoto(userId, pid, imgs.full);
       }
-      if (removedPhotos?.length) {
-        await supabase.storage.from("lesson-images").remove(removedPhotos.map((p) => photoPath(userId, p)));
+      for (const [did, doc] of Object.entries(newDocs || {})) {
+        await cloudUploadDoc(userId, did, doc.dataUrl, doc.mime);
+      }
+      const removedPaths = [
+        ...(removedPhotos || []).map((p) => photoPath(userId, p)),
+        ...(removedDocs || []).map((d) => docPath(userId, d)),
+      ];
+      if (removedPaths.length) {
+        await supabase.storage.from("lesson-images").remove(removedPaths);
       }
     });
   };
@@ -810,6 +945,36 @@ export default function LessonLog() {
     if (d) setFulls((f) => ({ ...f, [pid]: d }));
     return d;
   }, [fulls, thumbs, userId]);
+
+  const [busyDoc, setBusyDoc] = useState(null);
+  const openDoc = useCallback(async (doc) => {
+    setBusyDoc(doc.id);
+    try {
+      let d = lsGet(lsDocKey(doc.id));
+      if (!d && supabase && userId) {
+        d = await cloudDownloadDoc(userId, doc.id);
+        if (d) lsSet(lsDocKey(doc.id), d);
+      }
+      if (!d) {
+        window.alert("Document unavailable offline — sign in to fetch it from the cloud.");
+        return;
+      }
+      const blob = dataUrlToBlob(d);
+      const typed = new Blob([blob], { type: doc.mime || "application/octet-stream" });
+      const url = URL.createObjectURL(typed);
+      const win = window.open(url, "_blank");
+      if (!win) {
+        /* popup blocked — fall back to download */
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = doc.name;
+        a.click();
+      }
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+    } finally {
+      setBusyDoc(null);
+    }
+  }, [userId]);
 
   const openLightbox = async (photoIds, index) => {
     setLightbox({ photoIds, index, loading: true });
@@ -917,6 +1082,22 @@ export default function LessonLog() {
                   </div>
                   {count > 0 && <div style={{ ...S.meta, marginTop: 4 }}>{count} lesson{count !== 1 ? "s" : ""}</div>}
                   {song.notes && <div style={{ ...S.meta, fontSize: 11, lineHeight: 1.5 }}>{song.notes}</div>}
+                  {((song.links || []).length > 0 || (song.docs || []).length > 0) && (
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 4 }}>
+                      {(song.links || []).map((l) => (
+                        <a key={l.id} href={l.url} target="_blank" rel="noopener noreferrer"
+                          style={{ ...S.chip(false, "#2E86C1"), padding: "4px 10px", textDecoration: "none", color: "#8FBBDB" }}>
+                          🔗 {l.label}
+                        </a>
+                      ))}
+                      {(song.docs || []).map((d) => (
+                        <span key={d.id} onClick={() => openDoc(d)}
+                          style={{ ...S.chip(false, "#D4A73B"), padding: "4px 10px", color: "#D9C58A" }}>
+                          📄 {busyDoc === d.id ? "Loading…" : d.name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {(song.photoIds || []).length > 0 && (
                     <div style={S.photoRow}>
                       {song.photoIds.map((pid, idx) => (
