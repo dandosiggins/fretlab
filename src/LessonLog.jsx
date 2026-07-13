@@ -143,6 +143,7 @@ async function cloudUpsertLesson(userId, l) {
   const { error } = await supabase.from("lessons").upsert({
     id: l.id, user_id: userId, lesson_date: l.date, notes: l.notes,
     techniques: l.techniques, song_ids: l.songIds, photo_ids: l.photoIds,
+    links: l.links || [], docs: l.docs || [],
     updated_at: l.updatedAt,
   });
   if (error) throw error;
@@ -161,8 +162,12 @@ async function cloudDeleteSong(userId, s) {
 async function cloudDeleteLesson(userId, l) {
   const { error } = await supabase.from("lessons").delete().eq("id", l.id);
   if (error) throw error;
-  if (l.photoIds?.length) {
-    await supabase.storage.from("lesson-images").remove(l.photoIds.map((p) => photoPath(userId, p)));
+  const paths = [
+    ...(l.photoIds || []).map((p) => photoPath(userId, p)),
+    ...(l.docs || []).map((d) => docPath(userId, d.id)),
+  ];
+  if (paths.length) {
+    await supabase.storage.from("lesson-images").remove(paths);
   }
 }
 async function cloudUploadPhoto(userId, pid, dataUrl) {
@@ -556,8 +561,56 @@ function LessonModal({ lesson, songs, thumbs, onSave, onCancel }) {
   const [photoIds, setPhotoIds] = useState(lesson?.photoIds || []);
   const [newPhotos, setNewPhotos] = useState({}); // pid -> {full, thumb}
   const [removedPhotos, setRemovedPhotos] = useState([]);
+  const [links, setLinks] = useState(lesson?.links || []);
+  const [linkLabel, setLinkLabel] = useState("");
+  const [linkUrl, setLinkUrl] = useState("");
+  const [docs, setDocs] = useState(lesson?.docs || []);
+  const [newDocs, setNewDocs] = useState({});
+  const [removedDocs, setRemovedDocs] = useState([]);
   const [busy, setBusy] = useState(false);
   const fileRef = useRef(null);
+  const docRef = useRef(null);
+
+  const addLink = () => {
+    const url = normalizeUrl(linkUrl);
+    if (!url) return;
+    setLinks([...links, { id: uid(), label: linkLabel.trim() || url.replace(/^https?:\/\/(www\.)?/, "").slice(0, 40), url }]);
+    setLinkLabel("");
+    setLinkUrl("");
+  };
+  const removeLink = (id) => setLinks(links.filter((l) => l.id !== id));
+
+  const handleDocs = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+    setBusy(true);
+    const added = {};
+    const metas = [];
+    for (const f of files) {
+      if (f.size > MAX_DOC_BYTES) {
+        window.alert(`"${f.name}" is over 8 MB — too large to attach. Link to it instead.`);
+        continue;
+      }
+      try {
+        const did = uid();
+        added[did] = { dataUrl: await fileToDataUrl(f), name: f.name, mime: f.type || "application/octet-stream" };
+        metas.push({ id: did, name: f.name, mime: f.type || "application/octet-stream" });
+      } catch (err) { console.error("Doc failed", err); }
+    }
+    setNewDocs((p) => ({ ...p, ...added }));
+    setDocs((p) => [...p, ...metas]);
+    setBusy(false);
+  };
+
+  const removeDoc = (did) => {
+    setDocs(docs.filter((d) => d.id !== did));
+    if (newDocs[did]) {
+      setNewDocs((p) => { const q = { ...p }; delete q[did]; return q; });
+    } else {
+      setRemovedDocs((r) => [...r, did]);
+    }
+  };
 
   const toggleSong = (id) =>
     setSongIds(songIds.includes(id) ? songIds.filter((x) => x !== id) : [...songIds, id]);
@@ -594,9 +647,9 @@ function LessonModal({ lesson, songs, thumbs, onSave, onCancel }) {
     onSave({
       id: lesson?.id || uid(),
       date, notes: notes.trim(), techniques: techniques.trim(),
-      songIds, photoIds,
+      songIds, photoIds, links, docs,
       updatedAt: new Date().toISOString(),
-    }, newPhotos, removedPhotos);
+    }, newPhotos, removedPhotos, newDocs, removedDocs);
   };
 
   return (
@@ -663,6 +716,40 @@ function LessonModal({ lesson, songs, thumbs, onSave, onCancel }) {
         <div style={{ fontSize: 11, color: "#7A6E58", marginTop: 6 }}>
           Snap the whiteboard before it gets erased — you can add several at once.
         </div>
+
+        <label style={S.label}>Links (lessons, tabs, videos)</label>
+        {links.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+            {links.map((l) => (
+              <span key={l.id} style={{ ...S.chip(false, "#2E86C1"), cursor: "default", padding: "5px 10px" }}>
+                🔗 {l.label}
+                <span style={{ cursor: "pointer", color: "#D8776C", marginLeft: 4, fontWeight: 700 }} onClick={() => removeLink(l.id)}>×</span>
+              </span>
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8 }}>
+          <input style={{ ...S.input, flex: 1 }} placeholder="Label (optional)" value={linkLabel} onChange={(e) => setLinkLabel(e.target.value)} />
+          <input style={{ ...S.input, flex: 2 }} placeholder="URL" value={linkUrl}
+            onChange={(e) => setLinkUrl(e.target.value)} onKeyDown={(e) => e.key === "Enter" && addLink()} />
+          <button style={S.btn(false)} onClick={addLink} disabled={!linkUrl.trim()}>Add</button>
+        </div>
+
+        <label style={S.label}>Documents (PDF tabs, charts — up to 8 MB)</label>
+        {docs.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+            {docs.map((d) => (
+              <span key={d.id} style={{ ...S.chip(false, "#D4A73B"), cursor: "default", padding: "5px 10px" }}>
+                📄 {d.name}
+                <span style={{ cursor: "pointer", color: "#D8776C", marginLeft: 4, fontWeight: 700 }} onClick={() => removeDoc(d.id)}>×</span>
+              </span>
+            ))}
+          </div>
+        )}
+        <button style={S.btn(false)} onClick={() => docRef.current?.click()} disabled={busy}>
+          {busy ? "Processing…" : "+ Attach documents"}
+        </button>
+        <input ref={docRef} type="file" accept=".pdf,.doc,.docx,.txt,.gp,.gpx,.gp5,.ptb,.musicxml,.xml" multiple style={{ display: "none" }} onChange={handleDocs} />
 
         <div style={{ display: "flex", gap: 10, marginTop: 24 }}>
           <button style={{ ...S.btn(true), flex: 1 }} onClick={submit}>
@@ -776,6 +863,8 @@ export default function LessonLog() {
           id: c.id, date: c.lesson_date, notes: c.notes, techniques: c.techniques,
           songIds: Array.isArray(c.song_ids) ? c.song_ids : [],
           photoIds: Array.isArray(c.photo_ids) ? c.photo_ids : [],
+          links: Array.isArray(c.links) ? c.links : [],
+          docs: Array.isArray(c.docs) ? c.docs : [],
           updatedAt: c.updated_at,
         }));
 
@@ -800,6 +889,10 @@ export default function LessonLog() {
           for (const pid of l.photoIds || []) {
             const full = lsGet(lsFullKey(pid));
             if (full) await cloudUploadPhoto(userId, pid, full);
+          }
+          for (const d of l.docs || []) {
+            const data = lsGet(lsDocKey(d.id));
+            if (data) await cloudUploadDoc(userId, d.id, data, d.mime);
           }
         }
         setSync("synced");
@@ -882,7 +975,7 @@ export default function LessonLog() {
   };
 
   /* --- lessons --- */
-  const handleSaveLesson = (lesson, newPhotos, removedPhotos) => {
+  const handleSaveLesson = (lesson, newPhotos, removedPhotos, newDocs, removedDocs) => {
     for (const [pid, imgs] of Object.entries(newPhotos || {})) {
       lsSet(lsThumbKey(pid), imgs.thumb);
       lsSet(lsFullKey(pid), imgs.full);
@@ -892,6 +985,12 @@ export default function LessonLog() {
     for (const pid of removedPhotos || []) {
       lsDel(lsThumbKey(pid));
       lsDel(lsFullKey(pid));
+    }
+    for (const [did, doc] of Object.entries(newDocs || {})) {
+      lsSet(lsDocKey(did), doc.dataUrl);
+    }
+    for (const did of removedDocs || []) {
+      lsDel(lsDocKey(did));
     }
     const exists = lessons.some((l) => l.id === lesson.id);
     const newLessons = (exists ? lessons.map((l) => (l.id === lesson.id ? lesson : l)) : [lesson, ...lessons])
@@ -905,8 +1004,15 @@ export default function LessonLog() {
       for (const [pid, imgs] of Object.entries(newPhotos || {})) {
         await cloudUploadPhoto(userId, pid, imgs.full);
       }
-      if (removedPhotos?.length) {
-        await supabase.storage.from("lesson-images").remove(removedPhotos.map((p) => photoPath(userId, p)));
+      for (const [did, doc] of Object.entries(newDocs || {})) {
+        await cloudUploadDoc(userId, did, doc.dataUrl, doc.mime);
+      }
+      const removedPaths = [
+        ...(removedPhotos || []).map((p) => photoPath(userId, p)),
+        ...(removedDocs || []).map((d) => docPath(userId, d)),
+      ];
+      if (removedPaths.length) {
+        await supabase.storage.from("lesson-images").remove(removedPaths);
       }
     });
   };
@@ -916,6 +1022,9 @@ export default function LessonLog() {
     for (const pid of lesson.photoIds || []) {
       lsDel(lsThumbKey(pid));
       lsDel(lsFullKey(pid));
+    }
+    for (const d of lesson.docs || []) {
+      lsDel(lsDocKey(d.id));
     }
     const newLessons = lessons.filter((l) => l.id !== lesson.id);
     setLessons(newLessons);
@@ -1165,6 +1274,23 @@ export default function LessonLog() {
                 )}
 
                 {lesson.notes && <div style={S.lessonNotes}>{lesson.notes}</div>}
+
+                {((lesson.links || []).length > 0 || (lesson.docs || []).length > 0) && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 10 }}>
+                    {(lesson.links || []).map((l) => (
+                      <a key={l.id} href={l.url} target="_blank" rel="noopener noreferrer"
+                        style={{ ...S.chip(false, "#2E86C1"), padding: "4px 10px", textDecoration: "none", color: "#8FBBDB" }}>
+                        🔗 {l.label}
+                      </a>
+                    ))}
+                    {(lesson.docs || []).map((d) => (
+                      <span key={d.id} onClick={() => openDoc(d)}
+                        style={{ ...S.chip(false, "#D4A73B"), padding: "4px 10px", color: "#D9C58A" }}>
+                        📄 {busyDoc === d.id ? "Loading…" : d.name}
+                      </span>
+                    ))}
+                  </div>
+                )}
 
                 {(lesson.photoIds || []).length > 0 && (
                   <div style={S.photoRow}>
