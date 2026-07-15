@@ -392,6 +392,40 @@ function ItemModal({ item, categories, onSave, onCancel }) {
   );
 }
 
+/* ---------- read-only detail modal ---------- */
+function GearDetailModal({ item, cat, img, onEdit, onClose }) {
+  return (
+    <div style={S.overlay} onClick={onClose}>
+      <div style={{ ...S.modal, maxWidth: 560 }} onClick={(e) => e.stopPropagation()}>
+        {img && (
+          <img src={img} alt={item.name}
+            style={{ width: "100%", maxHeight: 340, objectFit: "cover", borderRadius: 8, marginBottom: 14, background: "#1B1715" }} />
+        )}
+        <h2 style={{ ...S.modalTitle, marginBottom: 4 }}>{item.name}</h2>
+        {(item.brand || item.year) && (
+          <div style={{ fontSize: 13, color: "#9C8F76", marginBottom: 10 }}>
+            {[item.brand, item.year].filter(Boolean).join(" · ")}
+          </div>
+        )}
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "center", marginBottom: 12, fontSize: 13 }}>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: "#C8BBA0" }}>
+            <span style={S.led(cat?.color || "#555", true)} /> {cat ? cat.name : "Uncategorized"}{item.type ? ` / ${item.type}` : ""}
+          </span>
+          {item.price && <span style={{ color: "#D4A73B", fontWeight: 700 }}>{item.price}</span>}
+          {item.serial && <span style={{ color: "#7A6E58", fontFamily: "ui-monospace, monospace" }}>S/N {item.serial}</span>}
+        </div>
+        {item.notes && (
+          <div style={{ fontSize: 13, lineHeight: 1.6, color: "#C8BBA0", whiteSpace: "pre-wrap", marginBottom: 14 }}>{item.notes}</div>
+        )}
+        <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+          <button style={{ ...S.btn(true), flex: 1 }} onClick={onEdit}>Edit</button>
+          <button style={{ ...S.btn(false), flex: 1 }} onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------- category manager modal ---------- */
 function CategoryModal({ categories, items, onSave, onClose }) {
   const [cats, setCats] = useState(() => JSON.parse(JSON.stringify(categories)));
@@ -485,6 +519,7 @@ export default function GearVault() {
     try { localStorage.setItem("fretlab-gear-layout", m); } catch {}
   };
   const [editing, setEditing] = useState(null);
+  const [viewing, setViewing] = useState(null); // item id for read-only detail
   const [showCats, setShowCats] = useState(false);
   const [chainPick, setChainPick] = useState("");
   const mergedRef = useRef(false);
@@ -880,7 +915,7 @@ export default function GearVault() {
               {visible.map((item) => {
                 const cat = catById[item.categoryId];
                 return (
-                  <div key={item.id} style={S.listRow}>
+                  <div key={item.id} style={{ ...S.listRow, cursor: "pointer" }} onClick={() => setViewing(item.id)}>
                     <span style={S.led(cat?.color || "#555", true)} />
                     <div style={{ flex: "2 1 160px", minWidth: 140 }}>
                       <div style={{ fontWeight: 700, color: "#F0E8D2", fontSize: 14 }}>{item.name}</div>
@@ -896,8 +931,8 @@ export default function GearVault() {
                     </div>
                     <div style={{ width: 86, textAlign: "right", color: "#D4A73B", fontWeight: 700, fontSize: 13 }}>{item.price || ""}</div>
                     <div style={{ display: "flex", gap: 6 }}>
-                      <button style={S.smallBtn(false)} onClick={() => setEditing({ ...item, imgData: images[item.id] || null })}>Edit</button>
-                      <button style={S.smallBtn(true)} onClick={() => handleDeleteItem(item)}>×</button>
+                      <button style={S.smallBtn(false)} onClick={(e) => { e.stopPropagation(); setEditing({ ...item, imgData: images[item.id] || null }); }}>Edit</button>
+                      <button style={S.smallBtn(true)} onClick={(e) => { e.stopPropagation(); handleDeleteItem(item); }}>×</button>
                     </div>
                   </div>
                 );
@@ -909,7 +944,7 @@ export default function GearVault() {
                 const cat = catById[item.categoryId];
                 const img = images[item.id];
                 return (
-                  <div key={item.id} style={S.card}>
+                  <div key={item.id} style={{ ...S.card, cursor: "pointer" }} onClick={() => setViewing(item.id)}>
                     {img
                       ? <img src={img} alt={item.name} style={S.cardImg} />
                       : <div style={S.cardImgEmpty}>{item.hasImage ? "…" : "♪"}</div>}
@@ -926,8 +961,8 @@ export default function GearVault() {
                       {item.serial && <div style={S.serial}>S/N {item.serial}</div>}
                       {item.notes && <div style={{ ...S.cardMeta, fontSize: 11, lineHeight: 1.5, marginTop: 2 }}>{item.notes}</div>}
                       <div style={S.cardActions}>
-                        <button style={S.smallBtn(false)} onClick={() => setEditing({ ...item, imgData: images[item.id] || null })}>Edit</button>
-                        <button style={S.smallBtn(true)} onClick={() => handleDeleteItem(item)}>Remove</button>
+                        <button style={S.smallBtn(false)} onClick={(e) => { e.stopPropagation(); setEditing({ ...item, imgData: images[item.id] || null }); }}>Edit</button>
+                        <button style={S.smallBtn(true)} onClick={(e) => { e.stopPropagation(); handleDeleteItem(item); }}>Remove</button>
                       </div>
                     </div>
                   </div>
@@ -993,6 +1028,19 @@ export default function GearVault() {
         </div>
       )}
 
+      {viewing && (() => {
+        const it = items.find((i) => i.id === viewing);
+        if (!it) return null;
+        return (
+          <GearDetailModal
+            item={it}
+            cat={catById[it.categoryId]}
+            img={images[it.id]}
+            onEdit={() => { setEditing({ ...it, imgData: images[it.id] || null }); setViewing(null); }}
+            onClose={() => setViewing(null)}
+          />
+        );
+      })()}
       {editing && (
         <ItemModal
           item={editing === "new" ? null : editing}
