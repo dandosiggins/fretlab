@@ -192,6 +192,12 @@ const S = {
     maxWidth: 1080, margin: "16px auto 0", padding: "0 20px",
     display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 16,
   },
+  listWrap: { maxWidth: 1080, margin: "16px auto 0", padding: "0 20px" },
+  listRow: {
+    display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+    padding: "9px 14px", marginBottom: 6,
+    background: "#241F1C", border: "1px solid #3B342C", borderRadius: 8,
+  },
   card: {
     background: "#262120", border: "1px solid #3B342C", borderRadius: 8, overflow: "hidden",
     display: "flex", flexDirection: "column", boxShadow: "0 3px 10px rgba(0,0,0,0.35)",
@@ -471,6 +477,13 @@ export default function GearVault() {
   const [search, setSearch] = useState("");
   const [filterCat, setFilterCat] = useState(null);
   const [view, setView] = useState("inventory"); // inventory | chain
+  const [layout, setLayout] = useState(() => {
+    try { return localStorage.getItem("fretlab-gear-layout") || "cards"; } catch { return "cards"; }
+  });
+  const setLayoutMode = (m) => {
+    setLayout(m);
+    try { localStorage.setItem("fretlab-gear-layout", m); } catch {}
+  };
   const [editing, setEditing] = useState(null);
   const [showCats, setShowCats] = useState(false);
   const [chainPick, setChainPick] = useState("");
@@ -830,6 +843,10 @@ export default function GearVault() {
         <>
           <div style={S.chipRow}>
             <input style={S.search} placeholder="Search name, brand, type, serial, notes…" value={search} onChange={(e) => setSearch(e.target.value)} />
+            <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+              <button style={S.viewToggle(layout === "cards")} onClick={() => setLayoutMode("cards")}>⊞ Cards</button>
+              <button style={S.viewToggle(layout === "list")} onClick={() => setLayoutMode("list")}>≡ List</button>
+            </span>
             <span style={S.chip(filterCat === null, "#D4A73B")} onClick={() => setFilterCat(null)}>
               <span style={S.led("#D4A73B", filterCat === null)} /> All
             </span>
@@ -857,6 +874,34 @@ export default function GearVault() {
               {items.length === 0
                 ? <>Your inventory is empty.<br />Hit <strong style={{ color: "#D4A73B" }}>+ Add item</strong> to log your first piece of gear.</>
                 : "Nothing matches that search or filter."}
+            </div>
+          ) : layout === "list" ? (
+            <div style={S.listWrap}>
+              {visible.map((item) => {
+                const cat = catById[item.categoryId];
+                return (
+                  <div key={item.id} style={S.listRow}>
+                    <span style={S.led(cat?.color || "#555", true)} />
+                    <div style={{ flex: "2 1 160px", minWidth: 140 }}>
+                      <div style={{ fontWeight: 700, color: "#F0E8D2", fontSize: 14 }}>{item.name}</div>
+                      {(item.brand || item.year) && (
+                        <div style={{ fontSize: 11, color: "#9C8F76" }}>{[item.brand, item.year].filter(Boolean).join(" · ")}</div>
+                      )}
+                    </div>
+                    <div style={{ flex: "1.4 1 120px", fontSize: 12, color: "#9C8F76" }}>
+                      {cat ? cat.name : "Uncategorized"}{item.type ? ` / ${item.type}` : ""}
+                    </div>
+                    <div style={{ flex: "1 1 110px", fontSize: 11, color: "#7A6E58", fontFamily: "ui-monospace, monospace" }}>
+                      {item.serial ? `S/N ${item.serial}` : ""}
+                    </div>
+                    <div style={{ width: 86, textAlign: "right", color: "#D4A73B", fontWeight: 700, fontSize: 13 }}>{item.price || ""}</div>
+                    <div style={{ display: "flex", gap: 6 }}>
+                      <button style={S.smallBtn(false)} onClick={() => setEditing({ ...item, imgData: images[item.id] || null })}>Edit</button>
+                      <button style={S.smallBtn(true)} onClick={() => handleDeleteItem(item)}>×</button>
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <div style={S.grid}>
