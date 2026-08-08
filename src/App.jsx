@@ -524,6 +524,22 @@ export default function FretLab() {
     }
   }, []);
 
+  // Songs from LessonLog's local mirror, so sheets can link to lesson songs.
+  // Keyed on `tab`: re-read when switching tabs, which picks up edits made
+  // in the Lessons tab by the time Song Chords is opened. LessonLog offers
+  // no same-tab change events, so a snapshot on tab switch is the contract.
+  const lessonSongs = useMemo(() => {
+    try {
+      const songs = JSON.parse(localStorage.getItem("fretlab-lessons"))?.songs;
+      return Array.isArray(songs)
+        ? songs.map(({ id, title, artist }) => ({ id, title, artist }))
+        : [];
+    } catch {
+      return [];
+    }
+    // eslint-disable-next-line
+  }, [tab]);
+
   /* -------- Cloud sync (Supabase) + local persistence -------- */
   const [user, setUser] = useState(null);
   const [syncStatus, setSyncStatus] = useState("local"); // local | saving | synced | error
@@ -1341,13 +1357,13 @@ chord("<${syms.join(" ")}>")
             ["scales", "SCALES & MODES"],
             ["chords", "CHORDS"],
             ["prog", "PROGRESSIONS"],
-            ["songchords", "SONG CHORDS"],
             ["circle", "CIRCLE OF 5THS"],
             ["ear", "EAR TRAINER"],
             ["notes", "NOTE QUIZ"],
             ["tuner", "TUNER"],
             ["gear", "GEAR"],
             ["lessons", "LESSONS"],
+            ["songchords", "SONG CHORDS"],
           ].map(([id, label]) => (
             <button
               key={id}
@@ -2802,7 +2818,7 @@ chord("<${syms.join(" ")}>")
 
       {/* ============ SONG CHORDS ============ */}
       {tab === "songchords" && (
-        <SongChords value={chordSheets} onChange={setChordSheets} />
+        <SongChords value={chordSheets} onChange={setChordSheets} songs={lessonSongs} />
       )}
 
       <footer className="foot">
