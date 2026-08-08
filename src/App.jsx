@@ -287,6 +287,30 @@ const persist = (obj) => {
   }
 };
 
+/* Per-sheet merge for chordSheets: union current and incoming by id; on id
+   collision the newer per-sheet updatedAt wins (tie → incoming); sheets
+   present on only one side are always kept. Everything else in the blob
+   stays whole-blob newest-wins — chord sheets alone get edited offline on
+   multiple devices, and wholesale replacement loses that work. */
+export function mergeChordSheets(current, incoming) {
+  const byId = new Map();
+  for (const s of Array.isArray(current) ? current : []) if (s) byId.set(s.id, s);
+  for (const s of Array.isArray(incoming) ? incoming : []) {
+    if (!s) continue;
+    const prev = byId.get(s.id);
+    if (!prev || (s.updatedAt || 0) >= (prev.updatedAt || 0)) byId.set(s.id, s);
+  }
+  return [...byId.values()];
+}
+
+/* chordSheets as applyState will apply them: per-sheet merge on sign-in,
+   wholesale replacement everywhere else (a restore should produce the
+   backup's contents, not a union). */
+export function resolveChordSheets(current, incoming, merge) {
+  if (merge) return mergeChordSheets(current, incoming);
+  return Array.isArray(incoming) ? incoming : [];
+}
+
 function triadQuality(a, b) {
   if (a === 4 && b === 3) return { q: "", cls: "maj" };
   if (a === 3 && b === 4) return { q: "m", cls: "min" };
@@ -561,9 +585,12 @@ export default function FretLab() {
     return () => sub.subscription.unsubscribe();
   }, []);
 
-  // Apply a state blob to the app (validating against what exists)
-  const applyState = (d) => {
-    if (!d || typeof d !== "object") return;
+  // Apply a state blob to the app (validating against what exists). Returns
+  // the blob as applied — or null if d is invalid — so callers mirror what
+  // the app actually shows. { merge: true } unions sheets per-id (sign-in);
+  // without it chordSheets replaces wholesale, like every other key.
+  const applyState = (d, { merge = false } = {}) => {
+    if (!d || typeof d !== "object") return null;
     hydratingRef.current = true;
     if (typeof d.root === "number" && d.root >= 0 && d.root < 12) setRoot(d.root);
     if (SCALES[d.scaleName]) setScaleName(d.scaleName);
@@ -582,12 +609,14 @@ export default function FretLab() {
     setProgSeventh(!!d.progSeventh);
     if (Array.isArray(d.prog)) setProg(d.prog);
     if (Array.isArray(d.savedProgs)) setSavedProgs(d.savedProgs);
-    setChordSheets(Array.isArray(d.chordSheets) ? d.chordSheets : []);
+    const sheets = resolveChordSheets(chordSheets, d.chordSheets, merge);
+    setChordSheets(sheets);
     if (["asc", "desc", "harm", "mix"].includes(d.earMode)) setEarMode(d.earMode);
     if (EAR_POOLS[d.earPoolName]) setEarPoolName(d.earPoolName);
     if (d.earStats && typeof d.earStats === "object") setEarStats(d.earStats);
     if (d.earScore && typeof d.earScore === "object") setEarScore(d.earScore);
     setTimeout(() => { hydratingRef.current = false; }, 0);
+    return { ...d, chordSheets: sheets };
   };
 
   const scheduleCloudSave = (blob) => {
@@ -619,8 +648,8 @@ export default function FretLab() {
       const cloudTs = row?.data?._ts || 0;
       const localTs = local?._ts || 0;
       if (row && cloudTs > localTs) {
-        applyState(row.data);
-        persist(row.data); // mirror the winner locally
+        const applied = applyState(row.data, { merge: true }) || row.data;
+        persist(applied); // mirror the winner locally, merged sheets included
         setSyncStatus("synced");
       } else {
         const blob = { ...local, _ts: localTs || Date.now() };
@@ -664,9 +693,9 @@ export default function FretLab() {
       try {
         const d = JSON.parse(r.result);
         const blob = { ...d, _ts: Date.now() };
-        applyState(blob);
-        persist(blob);
-        scheduleCloudSave(blob);
+        const applied = applyState(blob) || blob;
+        persist(applied);
+        scheduleCloudSave(applied);
         setAuthMsg("Backup imported.");
       } catch {
         setAuthMsg("That file didn't parse as a FretLab backup.");
