@@ -2,6 +2,7 @@ import { useState, useRef, useMemo, useEffect } from "react";
 import { supabase } from "./supabase.js";
 import GearVault from "./GearVault.jsx";
 import LessonLog from "./LessonLog.jsx";
+import SongChords from "./SongChords.jsx";
 
 /* ============================================================
    FRETLAB — Guitar Theory Workstation
@@ -487,6 +488,42 @@ export default function FretLab() {
   const [nqMode, setNqMode] = useState(SAVED.nqMode === "find" ? "find" : "name");
   const [adaptive, setAdaptive] = useState(SAVED.adaptive ?? true);
 
+  // Chord sheets (SongChords) — always an array so the component stays controlled
+  const [chordSheets, setChordSheets] = useState(
+    Array.isArray(SAVED.chordSheets) ? SAVED.chordSheets : []
+  );
+
+  // One-time migration: sheets created while SongChords ran uncontrolled live
+  // under its own localStorage key. Merge them into the synced blob (synced
+  // copies win on id collision), persist, then set a marker key. The legacy
+  // key is never deleted — the component is controlled now and never reads
+  // it. Fail-safe: if the marker write is quota-blocked, the migration just
+  // runs again next load, and the id-merge makes a repeat run a no-op.
+  useEffect(() => {
+    const MARKER = "fretlab-chord-sheets-migrated";
+    try {
+      if (localStorage.getItem(MARKER)) return;
+      const raw = localStorage.getItem("fretlab-chord-sheets");
+      if (!raw) return;
+      let legacy;
+      try {
+        legacy = JSON.parse(raw);
+      } catch {
+        return; // unparseable — touch nothing
+      }
+      if (!Array.isArray(legacy) || legacy.length === 0) return;
+      const saved = loadSaved();
+      const cur = Array.isArray(saved.chordSheets) ? saved.chordSheets : [];
+      const have = new Set(cur.map((s) => s.id));
+      const merged = [...cur, ...legacy.filter((s) => s && !have.has(s.id))];
+      persist({ ...saved, chordSheets: merged, _ts: Date.now() });
+      localStorage.setItem(MARKER, "1");
+      setChordSheets(merged);
+    } catch {
+      /* storage unavailable — run stateless, retry next load */
+    }
+  }, []);
+
   /* -------- Cloud sync (Supabase) + local persistence -------- */
   const [user, setUser] = useState(null);
   const [syncStatus, setSyncStatus] = useState("local"); // local | saving | synced | error
@@ -529,6 +566,7 @@ export default function FretLab() {
     setProgSeventh(!!d.progSeventh);
     if (Array.isArray(d.prog)) setProg(d.prog);
     if (Array.isArray(d.savedProgs)) setSavedProgs(d.savedProgs);
+    setChordSheets(Array.isArray(d.chordSheets) ? d.chordSheets : []);
     if (["asc", "desc", "harm", "mix"].includes(d.earMode)) setEarMode(d.earMode);
     if (EAR_POOLS[d.earPoolName]) setEarPoolName(d.earPoolName);
     if (d.earStats && typeof d.earStats === "object") setEarStats(d.earStats);
@@ -631,6 +669,7 @@ export default function FretLab() {
       earMode, earPoolName, earStats, earScore,
       droneVol, beatsPerBar,
       nqStats, nqScore, nqRange, nqMode, adaptive,
+      chordSheets,
       _ts: Date.now(),
     };
     persist(blob);
@@ -642,6 +681,7 @@ export default function FretLab() {
     earMode, earPoolName, earStats, earScore,
     droneVol, beatsPerBar,
     nqStats, nqScore, nqRange, nqMode, adaptive,
+    chordSheets,
   ]);
 
   const saveCurrentProg = () => {
@@ -1301,6 +1341,7 @@ chord("<${syms.join(" ")}>")
             ["scales", "SCALES & MODES"],
             ["chords", "CHORDS"],
             ["prog", "PROGRESSIONS"],
+            ["songchords", "SONG CHORDS"],
             ["circle", "CIRCLE OF 5THS"],
             ["ear", "EAR TRAINER"],
             ["notes", "NOTE QUIZ"],
@@ -2758,6 +2799,11 @@ chord("<${syms.join(" ")}>")
 
       {/* ============ LESSON LOG ============ */}
       {tab === "lessons" && <LessonLog />}
+
+      {/* ============ SONG CHORDS ============ */}
+      {tab === "songchords" && (
+        <SongChords value={chordSheets} onChange={setChordSheets} />
+      )}
 
       <footer className="foot">
         HAND-WIRED IN THE THEORY DEPARTMENT · NO TRANSISTORS WERE HARMED
